@@ -8,6 +8,7 @@ public sealed class SyncResult
     public int CopiedToTarget { get; set; }
     public int CopiedToSource { get; set; }
     public int Deleted { get; set; }
+    public int Pending { get; set; }
     public int Conflicts { get; set; }
     public int Errors { get; set; }
     public bool Aborted { get; set; }
@@ -21,8 +22,13 @@ public sealed class SyncResult
         ? $"Afgebroken: {AbortReason}"
         : SourceEmptied
         ? $"Doel was leeg: bron leeggemaakt ({Deleted} bestand(en) verwijderd, {Errors} fout(en)) in {Duration.TotalSeconds:0.0}s"
+        : Delivery
+        ? $"{CopiedToTarget} nieuw afgeleverd, {Deleted} verwerkt en uit bron verwijderd" +
+          (Pending > 0 ? $", {Pending} wacht (nog in gebruik)" : "") + $", {Errors} fout(en) in {Duration.TotalSeconds:0.0}s"
         : $"{CopiedToTarget} naar doel, {CopiedToSource} naar bron, {Deleted} verwijderd, " +
           $"{Conflicts} conflict(en), {Errors} fout(en) in {Duration.TotalSeconds:0.0}s";
+
+    public bool Delivery { get; set; }
 }
 
 /// <summary>
@@ -107,7 +113,9 @@ public sealed class SyncEngine
 
         if (!Validate(result)) return result;
 
-        if (_settings.Mode == SyncMode.OneWay)
+        if (_settings.IsDelivery)
+            RunDelivery(result, ct);
+        else if (_settings.Mode == SyncMode.OneWay)
             RunOneWay(result, ct);
         else
             RunTwoWay(result, ct);
@@ -143,7 +151,10 @@ public sealed class SyncEngine
 
         if (!Directory.Exists(_target))
         {
-            if (HasState() && (_settings.Mode == SyncMode.TwoWay || _settings.EmptySourceWhenTargetEmpty))
+            bool mustExist = _settings.IsDelivery
+                ? LoadLedger().Files.Count > 0
+                : HasState() && (_settings.Mode == SyncMode.TwoWay || _settings.EmptySourceWhenTargetEmpty);
+            if (mustExist)
                 return Abort(result, $"Doellocatie niet bereikbaar: {_target}");
             try { Directory.CreateDirectory(_target); }
             catch (Exception ex) { return Abort(result, $"Doellocatie kan niet worden aangemaakt: {ex.Message}"); }
@@ -209,6 +220,161 @@ public sealed class SyncEngine
 
         foreach (var dir in dst.Dirs.Where(d => !src.Dirs.Contains(d)).OrderByDescending(d => d.Length))
             Try(result, $"map verwijderen {dir}", () => DeleteDirIfEmpty(Path.Combine(_target, dir)));
+    }
+
+    // ---------------------------------------------------------------- afleverstand
+
+    /// <summary>Bestanden die korter dan dit geleden zijn gewijzigd, worden nog niet afgeleverd (mogelijk nog in gebruik).</summary>
+    internal static TimeSpan MinimumFileAge { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// One-way afleveren: elk bestand gaat één keer naar B. Een register (delivered-N.json) onthoudt wat al is
+    /// afgeleverd. Verdwijnt een bestand uit B (verwerkt door een machine), dan wordt het niet opnieuw gekopieerd;
+    /// optioneel wordt het dan ook uit A verwijderd. Een gewijzigd bestand in A wordt opnieuw afgeleverd.
+    /// </summary>
+    private void RunDelivery(SyncResult result, CancellationToken ct)
+    {
+        result.Delivery = true;
+        var ledger = LoadLedger();
+        var src = Scan(_source);
+        var dst = Scan(_target);
+        var youngest = DateTime.UtcNow - MinimumFileAge;
+        int sinceSave = 0;
+
+        try
+        {
+            foreach (var (rel, a) in src.Files.OrderBy(f => f.Key, PathComparer))
+            {
+                ct.ThrowIfCancellationRequested();
+                bool inB = dst.Files.TryGetValue(rel, out var b);
+
+                if (ledger.Files.TryGetValue(rel, out var delivered) && Same(a, delivered))
+                {
+                    // Al afgeleverd en ongewijzigd.
+                    if (!inB && _settings.DeleteProcessedFromSource)
+                    {
+                        if (Try(result, $"verwerkt bestand uit bron verwijderen {rel}", () => DeleteFile(Path.Combine(_source, rel))))
+                        {
+                            ledger.Files.Remove(rel);
+                            result.Deleted++;
+                            DeleteEmptyParents(_source, rel);
+                        }
+                    }
+                    continue;
+                }
+
+                if (inB && Same(a, b!))
+                {
+                    ledger.Files[rel] = a; // staat er al (bijv. eerste run): alleen registreren
+                    continue;
+                }
+
+                if (a.LastWriteUtc > youngest)
+                {
+                    result.Pending++; // wordt mogelijk nog geschreven; volgende run
+                    continue;
+                }
+
+                if (Try(result, $"afleveren {rel}", () => CopyFile(_source, _target, rel)))
+                {
+                    ledger.Files[rel] = a;
+                    result.CopiedToTarget++;
+                    if (++sinceSave >= 50) { SaveLedger(ledger); sinceSave = 0; }
+                }
+            }
+
+            // Register opschonen: bestanden die niet meer in A staan hoeven niet onthouden te worden.
+            foreach (var rel in ledger.Files.Keys.Where(k => !src.Files.ContainsKey(k)).ToList())
+                ledger.Files.Remove(rel);
+        }
+        finally
+        {
+            SaveLedger(ledger);
+        }
+    }
+
+    private void DeleteEmptyParents(string root, string rel)
+    {
+        var dir = Path.GetDirectoryName(Path.Combine(root, rel));
+        while (dir != null && dir.Length > root.Length && dir.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (Directory.EnumerateFileSystemEntries(dir).Any()) return;
+                Directory.Delete(dir);
+            }
+            catch { return; }
+            dir = Path.GetDirectoryName(dir);
+        }
+    }
+
+    /// <summary>
+    /// Markeert alle huidige bestanden in A als afgeleverd, zodat alleen bestanden die hierna nieuw
+    /// binnenkomen (of wijzigen) naar B gaan. Retourneert het aantal gemarkeerde bestanden.
+    /// </summary>
+    public static int MarkAllDelivered(SyncJob job)
+    {
+        Directory.CreateDirectory(SettingsStore.DataDirectory);
+        using var lockFile = new FileStream(SettingsStore.LockFile(job.Id), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var engine = new SyncEngine(job);
+        if (!Directory.Exists(engine._source))
+            throw new DirectoryNotFoundException($"Bronlocatie niet bereikbaar: {engine._source}");
+        var ledger = new SyncStateData { SourcePath = engine._source, TargetPath = engine._target };
+        foreach (var (rel, a) in engine.Scan(engine._source).Files)
+            ledger.Files[rel] = a;
+        engine.SaveLedger(ledger);
+        SyncLog.Info(engine._tag + $"{ledger.Files.Count} bestaande bestand(en) in de bron gemarkeerd als afgeleverd.");
+        return ledger.Files.Count;
+    }
+
+    /// <summary>Wist het afleverregister: bij de volgende run worden alle bestanden in A opnieuw afgeleverd.</summary>
+    public static void ResetDelivered(SyncJob job)
+    {
+        var file = SettingsStore.DeliveredFile(job.Id);
+        if (File.Exists(file)) File.Delete(file);
+        // Lege (maar bestaande) registratie voorkomt overname uit de oude staat.
+        var engine = new SyncEngine(job);
+        engine.SaveLedger(new SyncStateData { SourcePath = engine._source, TargetPath = engine._target });
+        SyncLog.Info(engine._tag + "Afleverregister gewist; alle bestanden worden opnieuw afgeleverd.");
+    }
+
+    private SyncStateData LoadLedger()
+    {
+        var file = SettingsStore.DeliveredFile(_settings.Id);
+        try
+        {
+            if (File.Exists(file))
+            {
+                var s = JsonSerializer.Deserialize<SyncStateData>(File.ReadAllText(file), SettingsStore.JsonOptions);
+                if (s != null && PathComparer.Equals(s.SourcePath, _source) && PathComparer.Equals(s.TargetPath, _target))
+                    return s.WithComparer();
+            }
+            else
+            {
+                // Eerste keer afleverstand: wat bij de vorige (one-way) sync al in B stond, geldt als afgeleverd.
+                var state = LoadState();
+                if (state.Files.Count > 0)
+                {
+                    SyncLog.Info(_tag + $"Afleverstand ingeschakeld: {state.Files.Count} eerder gesynchroniseerde bestand(en) gelden als afgeleverd.");
+                    return state;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            SyncLog.Warn(_tag + "Afleverregister onleesbaar: " + ex.Message);
+            throw new InvalidOperationException("Afleverregister onleesbaar; afgebroken om dubbel afleveren te voorkomen.", ex);
+        }
+        return new SyncStateData { SourcePath = _source, TargetPath = _target };
+    }
+
+    private void SaveLedger(SyncStateData ledger)
+    {
+        Directory.CreateDirectory(SettingsStore.DataDirectory);
+        var file = SettingsStore.DeliveredFile(_settings.Id);
+        var tmp = file + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(ledger, SettingsStore.JsonOptions));
+        File.Move(tmp, file, overwrite: true);
     }
 
     // ---------------------------------------------------------------- two-way

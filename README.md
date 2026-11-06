@@ -19,6 +19,10 @@ als **Windows-service** op de achtergrond.
     Bij een conflict (beide kanten gewijzigd) wint de nieuwste versie; de oudere wordt bewaard als
     `naam (conflict COMPUTER datum).ext`.
   - *One-way*: alleen van A naar B. Optioneel *spiegelen*: wat uit A verdwijnt, wordt ook uit B verwijderd.
+- **Afleverstand** (one-way, optioneel): voor een doelmap waar een machine bestanden oppakt en verwijdert.
+  Elk bestand wordt maar één keer afgeleverd; wat de machine heeft verwerkt, wordt niet opnieuw gekopieerd.
+  Een gewijzigd bestand in A wordt wel opnieuw afgeleverd. Optioneel worden verwerkte bestanden ook uit A
+  verwijderd. Bestanden die minder dan 5 seconden geleden zijn gewijzigd, wachten tot de volgende run.
 - **Bron leegmaken als doel leeg is** (optioneel, per synchronisatie, standaard uit): wordt B (doel) bewust
   leeggemaakt, dan wordt A (bron) bij de volgende run ook leeggemaakt. Dit gebeurt alleen als B bereikbaar is
   en bij de vorige sync wel bestanden bevatte (nooit bij de eerste sync); uitgesloten bestanden blijven staan.

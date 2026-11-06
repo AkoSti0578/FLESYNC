@@ -12,6 +12,8 @@ bestandslocaties uitvoert. Elke synchronisatie heeft een eigen bron (A), doel (B
 
 - **Tweerichtings (A ⇄ B):** nieuwe, gewijzigde en verwijderde bestanden worden in beide richtingen doorgevoerd.
 - **One-way (A → B):** alleen van A naar B. Optioneel **spiegelen**: wat uit A verdwijnt, wordt ook uit B verwijderd.
+- **Afleverstand (one-way):** voor een doelmap waar een machine bestanden oppakt en verwijdert. Elk bestand
+  wordt maar één keer afgeleverd; verwerkte bestanden worden niet opnieuw gekopieerd.
 - **Optioneel: bron leegmaken als het doel leeg is.** Wordt B leeggemaakt, dan wordt A ook leeggemaakt.
 - **Schema per synchronisatie:** elke *N* minuten (1 – 10080), of dagelijks op een vast tijdstip.
 - De synchronisaties worden uitgevoerd door de Windows-service **FLEsync**. Daarnaast kan vanuit de app
@@ -46,6 +48,7 @@ bestandslocaties uitvoert. Elke synchronisatie heeft een eigen bron (A), doel (B
 | `settings.json` | Instellingen van beide synchronisaties |
 | `state-1.json`, `state-2.json` | Staat van de vorige run per synchronisatie: bestanden die aan beide kanten gelijk waren. Nodig om verwijderingen te herkennen en voor "bron leegmaken als doel leeg is" |
 | `status-1.json`, `status-2.json` | Laatste resultaat per synchronisatie (tijd, gelukt/mislukt, samenvatting, uitgevoerd door) |
+| `delivered-1.json`, `delivered-2.json` | Afleverregister (alleen bij afleverstand): welke bestanden al naar B zijn afgeleverd, met grootte en wijzigingstijd |
 | `sync-1.lock`, `sync-2.lock` | Lock-bestand; voorkomt dat app en service dezelfde synchronisatie tegelijk uitvoeren |
 | `logs\flesync-JJJJMMDD.log` | Dagelijks logbestand. Logs ouder dan 30 dagen worden opgeruimd bij het starten van de service |
 
@@ -119,6 +122,10 @@ Het scherm heeft twee tabbladen: **Synchronisatie 1** en **Synchronisatie 2**. P
 | Naam | Vrije naam, bijv. "Archief" (verschijnt in tabblad en logboek) |
 | Locatie A / Locatie B | Map of netwerkpad. Bij one-way is A de bron en B het doel |
 | Richting | Tweerichtings of One-way (+ optioneel spiegelen) |
+| *Alleen nieuwe bestanden afleveren* (alleen bij one-way) | Afleverstand, zie §6. Spiegelen en "bron leegmaken" zijn dan uitgeschakeld |
+| *Verwerkte bestanden ook uit A verwijderen* | Bij afleverstand: bestanden die uit B zijn verdwenen (verwerkt) worden ook uit A verwijderd |
+| *Huidige bestanden in A markeren als afgeleverd* (link) | Alles wat nu in A staat geldt als afgeleverd; alleen wat hierna binnenkomt gaat naar B |
+| *Afleverregister wissen* (link) | Bij de volgende run wordt alles in A opnieuw afgeleverd |
 | *Als B (doel) leeg is, ook A (bron) leegmaken* | Standaard uit. Bij inschakelen volgt een bevestigingsvraag. Zie §6 |
 | Uitsluiten | Patronen gescheiden door `;`. Standaard: `*.tmp; ~$*; Thumbs.db; desktop.ini` |
 | Synchronisatietijd | Elke *N* minuten, of dagelijks om *HH:mm* |
@@ -164,7 +171,9 @@ Wijzigingen worden binnen **±10 seconden** door een draaiende service overgenom
       "TargetPath": "\\\\backup01\\archief-kopie",
       "Mode": "OneWay",
       "MirrorDeletes": true,
-      "EmptySourceWhenTargetEmpty": true,
+      "EmptySourceWhenTargetEmpty": false,
+      "DeliverNewOnly": true,
+      "DeleteProcessedFromSource": false,
       "Schedule": "Daily",
       "IntervalMinutes": 15,
       "DailyTime": "23:30",
@@ -206,8 +215,36 @@ Bestanden die aan beide kanten bestaan maar verschillen, worden als conflict beh
 - **Zonder spiegelen:** in B wordt nooit iets verwijderd.
 - **Met spiegelen:** bestanden en mappen in B die niet in A staan, worden verwijderd (uitgesloten patronen niet).
 
+### Afleverstand (one-way, "alleen nieuwe bestanden")
+Bedoeld voor een doelmap B waar een **machine of applicatie bestanden oppakt en daarna verwijdert**. In de gewone
+one-way stand zou FLEsync zo'n verwijderd bestand bij de volgende run opnieuw kopiëren, waardoor de machine het
+nog eens verwerkt. De afleverstand voorkomt dat.
+
+| Situatie | Actie |
+| --- | --- |
+| Nieuw bestand in A | Afleveren naar B en vastleggen in het afleverregister (`delivered-N.json`) |
+| Afgeleverd, staat nog in B | Niets (wacht op verwerking) |
+| Afgeleverd, uit B verdwenen (verwerkt) | **Niet opnieuw kopiëren.** Met *Verwerkte bestanden ook uit A verwijderen*: ook uit A verwijderen (lege submappen in A worden opgeruimd) |
+| Bestand in A gewijzigd (andere grootte of wijzigingstijd) | Geldt als nieuw: wordt opnieuw afgeleverd |
+| Bestand uit A verwijderd | Wordt uit het register gehaald. Verschijnt later een bestand met dezelfde naam, dan wordt het afgeleverd |
+| Bestand in A minder dan 5 seconden geleden gewijzigd | Wacht tot de volgende run (wordt mogelijk nog geschreven) |
+
+- Afleveren is atomair: eerst `<bestand>.flesync.tmp`, daarna hernoemen naar de echte naam. De machine ziet het
+  bestand dus pas als het compleet is. **Let op:** de machine moet `*.flesync.tmp`-bestanden negeren als die
+  op alle bestanden in de map reageert.
+- **Overstappen van gewone one-way naar afleverstand:** bestanden die bij de vorige one-way sync al in B stonden,
+  gelden automatisch als afgeleverd. Zijn er toch bestanden in A die al verwerkt zijn, gebruik dan
+  *Huidige bestanden in A markeren als afgeleverd* voordat de service de volgende run doet.
+- **Veiligheid:** is B niet bereikbaar terwijl er al eerder is afgeleverd, dan stopt de sync. Er wordt dan niets
+  uit A verwijderd en niets dubbel afgeleverd. Is het afleverregister onleesbaar, dan stopt de sync ook.
+- Het register hoort bij de combinatie bron + doel. Wordt een van de paden gewijzigd, dan begint een nieuw register
+  en wordt alles in A opnieuw afgeleverd. Markeer in dat geval eerst de huidige bestanden als afgeleverd.
+
 ### Optie: bron leegmaken als het doel leeg is
-Werkt bij tweerichtings en bij one-way. Staat standaard **uit**.
+Werkt bij tweerichtings en bij one-way, **niet** in de afleverstand. Staat standaard **uit**.
+Voor een map die door een machine wordt leeggehaald is de afleverstand met *Verwerkte bestanden ook uit A
+verwijderen* de veiligere keuze: die verwijdert alleen bestanden die echt zijn afgeleverd en verwerkt, niet
+bestanden die net in A zijn binnengekomen.
 
 Als B (doel) **geen bestanden** meer bevat, worden in A (bron) alle bestanden en mappen verwijderd, behalve
 uitgesloten patronen. De bestanden gaan **niet** naar de prullenbak. Dit gebeurt alleen als **alle** voorwaarden gelden:
@@ -275,6 +312,8 @@ Voorbeeld van een geslaagde regel:
 | "Bronlocatie niet bereikbaar" / "Doellocatie niet bereikbaar" | Pad bestaat niet of geen rechten. Controleer het UNC-pad en de rechten van het service-account (computeraccount bij LocalSystem) |
 | Werkt handmatig wel, via de service niet | Gekoppelde stationsletter gebruikt, of het computeraccount heeft geen rechten → UNC-pad en rechten aanpassen of serviceaccount instellen (§5.2) |
 | "Locatie … is onverwacht leeg; afgebroken…" | Een kant is leeg terwijl er eerder bestanden waren. Controleer de bereikbaarheid. Was het leegmaken van B bewust en moet A ook leeg? Zet de optie "Als B (doel) leeg is, ook A (bron) leegmaken" aan. Anders: zie hieronder "Staat resetten" |
+| Machine verwerkt bestanden dubbel | Afleverstand staat niet aan, of de paden zijn gewijzigd (nieuw register). Zet *Alleen nieuwe bestanden afleveren* aan en markeer de huidige bestanden als afgeleverd |
+| Bestand wordt niet afgeleverd | Staat het al in het afleverregister (eerder afgeleverd)? Wijzig het bestand, verwijder de regel uit `delivered-N.json`, of wis het register. Recent gewijzigde bestanden wachten tot de volgende run |
 | Bron is onverwacht leeggemaakt | De optie "bron leegmaken als doel leeg is" staat aan en B was leeg. Controleer het logboek (`WARN … wordt leeggemaakt`) en zet bestanden terug vanuit de back-up |
 | "Deze synchronisatie loopt al." | Er loopt al een run (app of service). Wachten. Blijft het hangen: service herstarten |
 | Veel `Mislukt: kopiëren …` | Bestanden in gebruik (bijv. Outlook-PST, databases) of te weinig rechten. Uitsluiten of buiten werktijd synchroniseren |

@@ -42,6 +42,20 @@ public sealed class SyncJob
     /// </summary>
     public bool EmptySourceWhenTargetEmpty { get; set; }
 
+    /// <summary>
+    /// Alleen bij one-way: afleverstand. Elk bestand wordt maar één keer naar B gekopieerd. Wordt het daar
+    /// door een machine opgepakt en verwijderd, dan wordt het niet opnieuw gekopieerd. Een gewijzigd
+    /// bestand in A (andere grootte/tijd) geldt als nieuw en wordt wel opnieuw afgeleverd.
+    /// </summary>
+    public bool DeliverNewOnly { get; set; }
+
+    /// <summary>Alleen bij afleverstand: bestanden die in B zijn verwerkt (verdwenen) ook uit A verwijderen.</summary>
+    public bool DeleteProcessedFromSource { get; set; }
+
+    /// <summary>One-way met afleverstand.</summary>
+    [JsonIgnore]
+    public bool IsDelivery => Mode == SyncMode.OneWay && DeliverNewOnly;
+
     public ScheduleType Schedule { get; set; } = ScheduleType.Interval;
 
     /// <summary>Interval in minuten bij <see cref="ScheduleType.Interval"/>.</summary>
@@ -90,11 +104,13 @@ public sealed class SyncJob
 
     public string Describe()
     {
-        var mode = Mode == SyncMode.TwoWay ? "tweerichtings" : (MirrorDeletes ? "one-way (spiegelen)" : "one-way");
+        var mode = Mode == SyncMode.TwoWay ? "tweerichtings"
+            : IsDelivery ? (DeleteProcessedFromSource ? "afleveren, verwerkte uit bron verwijderen" : "afleveren (alleen nieuwe)")
+            : MirrorDeletes ? "one-way (spiegelen)" : "one-way";
         var when = Schedule == ScheduleType.Interval
             ? $"elke {IntervalMinutes} min"
             : $"dagelijks om {GetDailyTime():hh\\:mm}";
-        return EmptySourceWhenTargetEmpty ? $"{mode}, {when}, bron leeg als doel leeg" : $"{mode}, {when}";
+        return EmptySourceWhenTargetEmpty && !IsDelivery ? $"{mode}, {when}, bron leeg als doel leeg" : $"{mode}, {when}";
     }
 }
 
@@ -138,6 +154,7 @@ public static class SettingsStore
     public static string StateFile(int jobId) => Path.Combine(DataDirectory, $"state-{jobId}.json");
     public static string StatusFile(int jobId) => Path.Combine(DataDirectory, $"status-{jobId}.json");
     public static string LockFile(int jobId) => Path.Combine(DataDirectory, $"sync-{jobId}.lock");
+    public static string DeliveredFile(int jobId) => Path.Combine(DataDirectory, $"delivered-{jobId}.json");
 
     // Bestanden van versie 1.0 (één synchronisatie); worden automatisch overgenomen als job 1.
     internal static string LegacyStateFile => Path.Combine(DataDirectory, "state.json");

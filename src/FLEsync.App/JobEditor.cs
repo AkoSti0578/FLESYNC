@@ -20,6 +20,10 @@ internal sealed class JobEditor : UserControl
     private readonly RadioButton _twoWay = Radio("Tweerichtings – A en B gelijk houden (A ⇄ B)");
     private readonly RadioButton _oneWay = Radio("One-way – alleen van A naar B (A → B)");
     private readonly CheckBox _mirror = new() { Text = "Bestanden die uit A verdwijnen ook in B verwijderen (spiegelen)", AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(22, 2, 0, 2) };
+    private readonly CheckBox _deliver = new() { Text = "Alleen nieuwe bestanden afleveren (wat in B is opgepakt/verwijderd niet opnieuw kopiëren)", AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(22, 2, 0, 2) };
+    private readonly CheckBox _deleteProcessed = new() { Text = "Verwerkte bestanden (uit B verdwenen) ook uit A verwijderen", AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(44, 2, 0, 2) };
+    private readonly LinkLabel _markDelivered = new() { Text = "Huidige bestanden in A markeren als afgeleverd", AutoSize = true, LinkColor = Theme.Blue, ActiveLinkColor = Theme.Accent, Margin = new Padding(44, 4, 0, 0) };
+    private readonly LinkLabel _resetDelivered = new() { Text = "Afleverregister wissen (alles opnieuw afleveren)", AutoSize = true, LinkColor = Theme.Blue, ActiveLinkColor = Theme.Accent, Margin = new Padding(44, 2, 0, 2) };
     private readonly CheckBox _emptySource = new() { Text = "Als B (doel) leeg is, ook A (bron) leegmaken", AutoSize = true, ForeColor = Theme.Danger, Margin = new Padding(0, 8, 0, 2) };
     private readonly TextBox _exclude = NewTextBox();
 
@@ -129,6 +133,10 @@ internal sealed class JobEditor : UserControl
         dir.Controls.Add(_twoWay);
         dir.Controls.Add(_oneWay);
         dir.Controls.Add(_mirror);
+        dir.Controls.Add(_deliver);
+        dir.Controls.Add(_deleteProcessed);
+        dir.Controls.Add(_markDelivered);
+        dir.Controls.Add(_resetDelivered);
         dir.Controls.Add(_emptySource);
         dir.Controls.Add(new Label { Text = "Uitsluiten (gescheiden door ;)", AutoSize = true, ForeColor = Theme.TextMuted, Margin = new Padding(0, 10, 0, 2) });
         _exclude.Dock = DockStyle.None;
@@ -172,6 +180,10 @@ internal sealed class JobEditor : UserControl
         foreach (var r in new[] { _twoWay, _oneWay, _interval, _daily })
             r.CheckedChanged += (_, _) => { UpdateEnabledState(); OnChanged(); };
         _mirror.CheckedChanged += (_, _) => OnChanged();
+        _deliver.CheckedChanged += (_, _) => { UpdateEnabledState(); OnChanged(); };
+        _deleteProcessed.CheckedChanged += (_, _) => OnChanged();
+        _markDelivered.LinkClicked += (_, _) => MarkDelivered();
+        _resetDelivered.LinkClicked += (_, _) => ResetDelivered();
         _emptySource.CheckedChanged += (_, _) =>
         {
             if (!_loading && _emptySource.Checked && MessageBox.Show(FindForm(),
@@ -210,6 +222,8 @@ internal sealed class JobEditor : UserControl
         _oneWay.Checked = job.Mode == SyncMode.OneWay;
         _mirror.Checked = job.MirrorDeletes;
         _emptySource.Checked = job.EmptySourceWhenTargetEmpty;
+        _deliver.Checked = job.DeliverNewOnly;
+        _deleteProcessed.Checked = job.DeleteProcessedFromSource;
         _exclude.Text = string.Join("; ", job.ExcludePatterns);
         _interval.Checked = job.Schedule == ScheduleType.Interval;
         _daily.Checked = job.Schedule == ScheduleType.Daily;
@@ -227,7 +241,9 @@ internal sealed class JobEditor : UserControl
         SourcePath = _source.Text.Trim(),
         TargetPath = _target.Text.Trim(),
         Mode = _oneWay.Checked ? SyncMode.OneWay : SyncMode.TwoWay,
-        MirrorDeletes = _oneWay.Checked && _mirror.Checked,
+        MirrorDeletes = _oneWay.Checked && _mirror.Checked && !_deliver.Checked,
+        DeliverNewOnly = _oneWay.Checked && _deliver.Checked,
+        DeleteProcessedFromSource = _oneWay.Checked && _deliver.Checked && _deleteProcessed.Checked,
         EmptySourceWhenTargetEmpty = _emptySource.Checked,
         Schedule = _daily.Checked ? ScheduleType.Daily : ScheduleType.Interval,
         IntervalMinutes = (int)_minutes.Value,
@@ -299,11 +315,56 @@ internal sealed class JobEditor : UserControl
         var on = _enabled.Checked;
         foreach (var c in _detailControls) c.Enabled = on;
         _name.Enabled = on;
-        _mirror.Enabled = on && _oneWay.Checked;
+        var delivery = _oneWay.Checked && _deliver.Checked;
+        _mirror.Enabled = on && _oneWay.Checked && !_deliver.Checked;
+        _deliver.Enabled = on && _oneWay.Checked;
+        _deleteProcessed.Enabled = on && delivery;
+        _markDelivered.Visible = _resetDelivered.Visible = delivery;
+        _markDelivered.Enabled = _resetDelivered.Enabled = on;
+        _emptySource.Enabled = on && !delivery;
         _minutes.Enabled = on && _interval.Checked;
         _time.Enabled = on && _daily.Checked;
         _sourceLabel.Text = _oneWay.Checked ? "Locatie A (bron)" : "Locatie A";
         _targetLabel.Text = _oneWay.Checked ? "Locatie B (doel)" : "Locatie B";
+    }
+
+    private void MarkDelivered()
+    {
+        var job = ReadJob();
+        if (!job.IsConfigured) return;
+        if (MessageBox.Show(FindForm(),
+                "Alle bestanden die nu in locatie A staan worden als 'afgeleverd' gemarkeerd. Alleen bestanden die hierna " +
+                "nieuw binnenkomen (of wijzigen) gaan naar B.\n\nDoorgaan?",
+                "FLEsync – afleveren", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        try
+        {
+            var count = SyncEngine.MarkAllDelivered(job);
+            MessageBox.Show(FindForm(), $"{count} bestand(en) gemarkeerd als afgeleverd.", "FLEsync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(FindForm(), "Markeren mislukt: " + ex.Message, "FLEsync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ResetDelivered()
+    {
+        var job = ReadJob();
+        if (!job.IsConfigured) return;
+        if (MessageBox.Show(FindForm(),
+                "Het afleverregister wordt gewist. Bij de volgende synchronisatie worden ALLE bestanden in A opnieuw " +
+                "naar B gekopieerd en dus opnieuw door de machine opgepakt.\n\nDoorgaan?",
+                "FLEsync – afleveren", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            return;
+        try
+        {
+            SyncEngine.ResetDelivered(job);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(FindForm(), "Wissen mislukt: " + ex.Message, "FLEsync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void Browse(TextBox box)

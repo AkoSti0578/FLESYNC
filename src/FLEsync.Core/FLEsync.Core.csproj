@@ -3,4 +3,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>FLEsync.Core</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="FLEsync.Core.Tests" />
+  </ItemGroup>
 </Project>

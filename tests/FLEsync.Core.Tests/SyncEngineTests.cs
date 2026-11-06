@@ -12,6 +12,7 @@ public sealed class SyncEngineTests : IDisposable
 
     public SyncEngineTests()
     {
+        SyncEngine.MinimumFileAge = TimeSpan.Zero;
         Directory.CreateDirectory(A);
         Directory.CreateDirectory(B);
         SettingsStore.DataDirectory = Path.Combine(_root, "data");
@@ -315,6 +316,128 @@ public sealed class SyncEngineTests : IDisposable
         job.EmptySourceWhenTargetEmpty = true;
         SeedAndSync(job);
         Directory.Delete(B, true); // bv. share niet bereikbaar
+
+        var r = Run(job);
+
+        Assert.True(r.Aborted);
+        Assert.True(File.Exists(Path.Combine(A, "a.txt")));
+    }
+
+    private SyncJob Delivery(bool deleteProcessed = false) => new()
+    {
+        Id = 1, SourcePath = A, TargetPath = B, Mode = SyncMode.OneWay,
+        DeliverNewOnly = true, DeleteProcessedFromSource = deleteProcessed
+    };
+
+    private static DateTime Old => DateTime.UtcNow.AddHours(-1);
+
+    [Fact]
+    public void Delivery_ProcessedFilesAreNotDeliveredAgain()
+    {
+        var job = Delivery();
+        Write(Path.Combine(A, "order1.xml"), "1", Old);
+        Write(Path.Combine(A, "sub", "order2.xml"), "2", Old);
+        Assert.True(Run(job).Success);
+        Assert.True(File.Exists(Path.Combine(B, "sub", "order2.xml")));
+
+        // Machine pakt de bestanden op en verwijdert ze.
+        File.Delete(Path.Combine(B, "order1.xml"));
+        File.Delete(Path.Combine(B, "sub", "order2.xml"));
+        Write(Path.Combine(A, "order3.xml"), "3", Old);
+
+        var r = Run(job);
+
+        Assert.True(r.Success, r.ToString());
+        Assert.Equal(1, r.CopiedToTarget);
+        Assert.False(File.Exists(Path.Combine(B, "order1.xml")));
+        Assert.False(File.Exists(Path.Combine(B, "sub", "order2.xml")));
+        Assert.True(File.Exists(Path.Combine(B, "order3.xml")));
+        Assert.True(File.Exists(Path.Combine(A, "order1.xml"))); // bron blijft staan zonder optie
+    }
+
+    [Fact]
+    public void Delivery_ChangedSourceFileIsDeliveredAgain()
+    {
+        var job = Delivery();
+        Write(Path.Combine(A, "x.csv"), "v1", Old);
+        Run(job);
+        File.Delete(Path.Combine(B, "x.csv"));
+
+        Write(Path.Combine(A, "x.csv"), "v2 langer", DateTime.UtcNow.AddMinutes(-1));
+        Assert.Equal(1, Run(job).CopiedToTarget);
+        Assert.Equal("v2 langer", File.ReadAllText(Path.Combine(B, "x.csv")));
+    }
+
+    [Fact]
+    public void Delivery_DeleteProcessedFromSource()
+    {
+        var job = Delivery(deleteProcessed: true);
+        Write(Path.Combine(A, "sub", "a.pdf"), "a", Old);
+        Write(Path.Combine(A, "b.pdf"), "b", Old);
+        Run(job);
+
+        File.Delete(Path.Combine(B, "sub", "a.pdf")); // verwerkt
+        var r = Run(job);
+
+        Assert.True(r.Success, r.ToString());
+        Assert.Equal(1, r.Deleted);
+        Assert.False(Directory.Exists(Path.Combine(A, "sub")));
+        Assert.True(File.Exists(Path.Combine(A, "b.pdf"))); // nog niet verwerkt
+        Assert.True(File.Exists(Path.Combine(B, "b.pdf")));
+    }
+
+    [Fact]
+    public void Delivery_MarkAllDelivered_OnlyNewFilesGo()
+    {
+        var job = Delivery();
+        Write(Path.Combine(A, "old.txt"), "o", Old);
+        Assert.Equal(1, SyncEngine.MarkAllDelivered(job));
+        Write(Path.Combine(A, "new.txt"), "n", Old);
+
+        Run(job);
+
+        Assert.False(File.Exists(Path.Combine(B, "old.txt")));
+        Assert.True(File.Exists(Path.Combine(B, "new.txt")));
+
+        SyncEngine.ResetDelivered(job);
+        Run(job);
+        Assert.True(File.Exists(Path.Combine(B, "old.txt")));
+    }
+
+    [Fact]
+    public void Delivery_TakesOverPreviousOneWayState()
+    {
+        var plain = Settings(SyncMode.OneWay);
+        Write(Path.Combine(A, "done.txt"), "d", Old);
+        Run(plain);
+        File.Delete(Path.Combine(B, "done.txt")); // al verwerkt door machine
+
+        Run(Delivery());
+
+        Assert.False(File.Exists(Path.Combine(B, "done.txt")));
+    }
+
+    [Fact]
+    public void Delivery_YoungFilesWait()
+    {
+        SyncEngine.MinimumFileAge = TimeSpan.FromMinutes(5);
+        try
+        {
+            Write(Path.Combine(A, "busy.dat"), "x");
+            var r = Run(Delivery());
+            Assert.Equal(1, r.Pending);
+            Assert.False(File.Exists(Path.Combine(B, "busy.dat")));
+        }
+        finally { SyncEngine.MinimumFileAge = TimeSpan.Zero; }
+    }
+
+    [Fact]
+    public void Delivery_UnreachableTarget_DoesNotDeleteSource()
+    {
+        var job = Delivery(deleteProcessed: true);
+        Write(Path.Combine(A, "a.txt"), "a", Old);
+        Run(job);
+        Directory.Delete(B, true);
 
         var r = Run(job);
 
