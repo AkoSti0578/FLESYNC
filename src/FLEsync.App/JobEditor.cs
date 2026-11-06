@@ -130,6 +130,9 @@ internal sealed class JobEditor : UserControl
         // Richting
         var dirCard = new Card("Richting") { AutoSize = true, Margin = new Padding(0, 0, 7, 14) };
         var dir = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, BackColor = Theme.Card };
+        // Lange teksten laten afbreken zodat ze bij een smal venster niet wegvallen.
+        foreach (var c in new Control[] { _twoWay, _oneWay, _mirror, _deliver, _deleteProcessed, _emptySource })
+            c.MaximumSize = new Size(430, 0);
         dir.Controls.Add(_twoWay);
         dir.Controls.Add(_oneWay);
         dir.Controls.Add(_mirror);

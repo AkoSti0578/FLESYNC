@@ -28,7 +28,9 @@ internal sealed class MainForm : Form
         Text = "FLEsync – Normec Group";
         Icon = Theme.AppIcon();
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(900, 820);
+        // Klein minimum zodat het venster ook op lage resoluties / hoge schaalinstellingen past;
+        // de inhoud scrolt en de actieknoppen staan altijd zichtbaar onderin.
+        MinimumSize = new Size(700, 480);
         Size = new Size(1000, 960);
         BackColor = Theme.Background;
         Font = Theme.Base;
@@ -55,26 +57,48 @@ internal sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var body = new TableLayoutPanel
+        // Scrollbaar gebied met de instellingen en het logboek.
+        var scroll = new Panel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
+            AutoScroll = true,
             Padding = new Padding(24, 16, 24, 8),
-            AutoScroll = true
+            BackColor = Theme.Background
         };
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // tabs
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // job-editor
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // acties
-        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // logboek
+        var content = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // tabs
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // job-editor
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // logboek
 
-        body.Controls.Add(BuildTabs(), 0, 0);
-        body.Controls.Add(BuildJobHost(), 0, 1);
-        body.Controls.Add(BuildActionsCard(), 0, 2);
-        body.Controls.Add(BuildLogCard(), 0, 3);
+        content.Controls.Add(BuildTabs(), 0, 0);
+        content.Controls.Add(BuildJobHost(), 0, 1);
+        content.Controls.Add(BuildLogCard(), 0, 2);
+        scroll.Controls.Add(content);
 
-        Controls.Add(body);
+        // Volgorde bepaalt het docken: header boven, footer + actiebalk altijd zichtbaar onder, rest scrolt.
+        Controls.Add(scroll);
+        Controls.Add(BuildActionBar());
         Controls.Add(BuildFooter());
         Controls.Add(BuildHeader());
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        // Venster nooit groter dan het beschikbare scherm (bijv. 1366×768 of 1280×720 met schaling).
+        var area = Screen.FromControl(this).WorkingArea;
+        if (Width > area.Width || Height > area.Height)
+        {
+            Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+            Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (area.Height - Height) / 2);
+        }
     }
 
     private Control BuildHeader()
@@ -135,24 +159,40 @@ internal sealed class MainForm : Form
         return host;
     }
 
-    private Control BuildActionsCard()
+    /// <summary>Vaste balk onderin met de belangrijkste knoppen; altijd zichtbaar, ook bij lage resolutie.</summary>
+    private Control BuildActionBar()
     {
-        var card = new Card("Service en acties") { AutoSize = true };
-        var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Theme.Card };
-        flow.Controls.Add(_save);
-        flow.Controls.Add(_syncAll);
-        flow.Controls.Add(_installService);
-        flow.Controls.Add(_startStop);
-        flow.Controls.Add(_uninstall);
-        flow.SetFlowBreak(_uninstall, true);
-        flow.Controls.Add(_serviceHint);
-        card.Controls.Add(flow);
-        return card;
+        var bar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            ColumnCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Theme.Card,
+            Padding = new Padding(24, 12, 24, 8)
+        };
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bar.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawLine(pen, 0, 0, bar.Width, 0);
+        };
+
+        var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Theme.Card, Margin = Padding.Empty };
+        foreach (var b in new[] { _save, _syncAll, _installService, _startStop, _uninstall })
+        {
+            b.Margin = new Padding(0, 0, 8, 6);
+            flow.Controls.Add(b);
+        }
+        _serviceHint.Margin = new Padding(0, 0, 0, 0);
+        bar.Controls.Add(flow, 0, 0);
+        bar.Controls.Add(_serviceHint, 0, 1);
+        return bar;
     }
 
     private Control BuildLogCard()
     {
-        var card = new Card("Logboek") { MinimumSize = new Size(0, 160) };
+        var card = new Card("Logboek") { MinimumSize = new Size(0, 220), Height = 220 };
         var holder = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Card };
         _log.BackColor = ColorTranslator.FromHtml("#F8FAFC");
         holder.Controls.Add(_log);
