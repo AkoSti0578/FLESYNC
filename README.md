@@ -1,24 +1,29 @@
 # FLEsync
 
-**FLEsync** is een Windows-applicatie van Normec Group om twee bestandslocaties met elkaar in sync te houden:
-**tweerichtings** (A ⇄ B) of **one-way** (A → B, optioneel spiegelen). De synchronisatie kan als
-**Windows-service** op een instelbaar schema draaien.
+**FLEsync** is een Windows-applicatie van Normec Group om bestandslocaties met elkaar in sync te houden.
+Er zijn **twee onafhankelijke synchronisaties**, elk met een eigen bron en doel, richting
+(**tweerichtings** A ⇄ B of **one-way** A → B, optioneel spiegelen) en schema. De synchronisaties draaien
+als **Windows-service** op de achtergrond.
 
 ![icoon](assets/flesync.png)
 
 ## Functies
 
 - **Instelscherm na installatie**: de MSI-wizard biedt op het laatste scherm "FLEsync nu starten".
-- **Twee locaties kiezen**: lokale mappen of netwerkshares (UNC-paden aanbevolen).
+- **Twee synchronisaties** (tabbladen *Synchronisatie 1* en *Synchronisatie 2*): elk met een eigen naam,
+  aan/uit-schakelaar, bron en doel, richting, uitsluitingen en schema. Ze lopen onafhankelijk van elkaar,
+  ook tegelijk.
+- **Locaties kiezen**: lokale mappen of netwerkshares (UNC-paden aanbevolen).
 - **Synchronisatierichting**
   - *Tweerichtings*: nieuwe, gewijzigde en verwijderde bestanden worden in beide richtingen doorgevoerd.
     Bij een conflict (beide kanten gewijzigd) wint de nieuwste versie; de oudere wordt bewaard als
     `naam (conflict COMPUTER datum).ext`.
   - *One-way*: alleen van A naar B. Optioneel *spiegelen*: wat uit A verdwijnt, wordt ook uit B verwijderd.
-- **Synchronisatietijd**: elke *N* minuten of dagelijks op een vast tijdstip.
+- **Synchronisatietijd per synchronisatie**: elke *N* minuten of dagelijks op een vast tijdstip.
 - **Knop "Als service instellen"**: installeert en start de Windows-service `FLEsync`
   (vraagt één keer om beheerdersrechten via UAC). Daarna ook starten/stoppen/verwijderen vanuit de app.
-- **Nu synchroniseren**: handmatige sync direct vanuit het scherm.
+- **Nu synchroniseren**: per synchronisatie, of beide tegelijk met *Alles nu synchroniseren*.
+- **Waarschuwing bij overlap**: als beide synchronisaties dezelfde of geneste mappen gebruiken.
 - **Uitsluitingen**: patronen zoals `*.tmp; ~$*; Thumbs.db`.
 - **Veiligheid**: sync wordt afgebroken als een locatie onbereikbaar of onverwacht leeg is (voorkomt massaal
   verwijderen), bron en doel mogen niet in elkaar liggen, app en service syncen nooit tegelijk.
@@ -29,7 +34,8 @@
 
 1. Download `FLEsync-<versie>-x64.msi` (GitHub Actions-artifact of Release).
 2. Installeer; FLEsync komt in `C:\Program Files\FLEsync` met snelkoppelingen in het Startmenu en op het bureaublad.
-3. Kies locatie A en B, richting en schema, en klik **Opslaan**.
+3. Stel op het tabblad *Synchronisatie 1* (en eventueel *Synchronisatie 2*) locatie A en B, richting en
+   schema in, en klik **Opslaan**. Een synchronisatie die je niet gebruikt kun je uitschakelen.
 4. Klik **Als service instellen**. De service start automatisch met Windows (vertraagd automatisch) en pakt
    latere wijzigingen in de instellingen vanzelf op.
 
@@ -42,6 +48,9 @@ De service draait standaard als *Lokaal systeem*. Die ziet geen gekoppelde stati
 op shares de rechten van het computeraccount. Gebruik daarom UNC-paden (`\\server\share\map`) en geef het
 computeraccount rechten, of stel in `services.msc` → *FLEsync Synchronisatie* → *Aanmelden* een
 (service)account in met toegang tot de share.
+
+Instellingen van een eerdere versie met één synchronisatie worden automatisch overgenomen als
+*Synchronisatie 1*. Het aantal synchronisaties staat in `SyncSettings.JobCount` en is eenvoudig te verhogen.
 
 ## Bouwen
 
@@ -61,7 +70,7 @@ GitHub Release met de MSI.
 
 | Pad | Inhoud |
 | --- | --- |
-| `src/FLEsync.Core` | Sync-engine, instellingen (`%ProgramData%\FLEsync\settings.json`), schema, logboek |
+| `src/FLEsync.Core` | Sync-engine, instellingen (`%ProgramData%\FLEsync\settings.json`, met beide synchronisaties), schema, logboek |
 | `src/FLEsync.App` | WinForms-instelscherm (`FLEsync.exe`), service-beheer via UAC |
 | `src/FLEsync.Service` | Windows-service (`FLEsync.Service.exe`) die volgens schema synchroniseert |
 | `installer` | WiX v5 MSI-project (Nederlandstalige wizard in Normec-stijl) |

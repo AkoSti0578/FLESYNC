@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace FLEsync.Core;
@@ -21,8 +22,13 @@ public enum ScheduleType
     Daily
 }
 
-public sealed class SyncSettings
+/// <summary>Eén synchronisatie: een bron/doel-paar met eigen richting en schema.</summary>
+public sealed class SyncJob
 {
+    public int Id { get; set; } = 1;
+    public string Name { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+
     public string SourcePath { get; set; } = "";
     public string TargetPath { get; set; } = "";
     public SyncMode Mode { get; set; } = SyncMode.TwoWay;
@@ -41,8 +47,16 @@ public sealed class SyncSettings
     /// <summary>Bestandspatronen die worden overgeslagen (bijv. *.tmp, ~$*).</summary>
     public List<string> ExcludePatterns { get; set; } = new() { "*.tmp", "~$*", "Thumbs.db", "desktop.ini" };
 
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(Name) ? $"Synchronisatie {Id}" : Name.Trim();
+
+    [JsonIgnore]
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(SourcePath) && !string.IsNullOrWhiteSpace(TargetPath);
+
+    /// <summary>Ingeschakeld én volledig ingesteld.</summary>
+    [JsonIgnore]
+    public bool IsActive => Enabled && IsConfigured;
 
     public TimeSpan GetDailyTime() =>
         TimeSpan.TryParse(DailyTime, out var t) && t >= TimeSpan.Zero && t < TimeSpan.FromDays(1)
@@ -78,6 +92,30 @@ public sealed class SyncSettings
     }
 }
 
+public sealed class SyncSettings
+{
+    /// <summary>Aantal synchronisaties dat FLEsync beheert.</summary>
+    public const int JobCount = 2;
+
+    public List<SyncJob> Jobs { get; set; } = new();
+
+    /// <summary>Zorgt dat er precies <see cref="JobCount"/> jobs met Id 1..N zijn.</summary>
+    public SyncSettings Normalize()
+    {
+        var jobs = new List<SyncJob>();
+        for (int id = 1; id <= JobCount; id++)
+        {
+            var job = Jobs.FirstOrDefault(j => j.Id == id) ?? new SyncJob { Id = id, Enabled = id == 1 };
+            job.Id = id;
+            jobs.Add(job);
+        }
+        Jobs = jobs;
+        return this;
+    }
+
+    public SyncJob Job(int id) => Jobs.First(j => j.Id == id);
+}
+
 /// <summary>Leest en schrijft de instellingen in %ProgramData%\FLEsync zodat app en service dezelfde configuratie delen.</summary>
 public static class SettingsStore
 {
@@ -90,9 +128,14 @@ public static class SettingsStore
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "FLEsync");
 
     public static string SettingsFile => Path.Combine(DataDirectory, "settings.json");
-    public static string StateFile => Path.Combine(DataDirectory, "state.json");
-    public static string StatusFile => Path.Combine(DataDirectory, "status.json");
     public static string LogDirectory => Path.Combine(DataDirectory, "logs");
+    public static string StateFile(int jobId) => Path.Combine(DataDirectory, $"state-{jobId}.json");
+    public static string StatusFile(int jobId) => Path.Combine(DataDirectory, $"status-{jobId}.json");
+    public static string LockFile(int jobId) => Path.Combine(DataDirectory, $"sync-{jobId}.lock");
+
+    // Bestanden van versie 1.0 (één synchronisatie); worden automatisch overgenomen als job 1.
+    internal static string LegacyStateFile => Path.Combine(DataDirectory, "state.json");
+    internal static string LegacyStatusFile => Path.Combine(DataDirectory, "status.json");
 
     internal static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -105,20 +148,31 @@ public static class SettingsStore
         try
         {
             if (File.Exists(SettingsFile))
-                return JsonSerializer.Deserialize<SyncSettings>(File.ReadAllText(SettingsFile), JsonOptions) ?? new();
+            {
+                var node = JsonNode.Parse(File.ReadAllText(SettingsFile));
+                if (node is JsonObject obj && !obj.ContainsKey(nameof(SyncSettings.Jobs)))
+                {
+                    // Oud formaat: de instellingen zelf waren één synchronisatie.
+                    var legacy = obj.Deserialize<SyncJob>(JsonOptions) ?? new SyncJob();
+                    legacy.Id = 1;
+                    legacy.Enabled = true;
+                    return new SyncSettings { Jobs = { legacy } }.Normalize();
+                }
+                return (node.Deserialize<SyncSettings>(JsonOptions) ?? new SyncSettings()).Normalize();
+            }
         }
         catch
         {
             // Corrupte of half geschreven configuratie: val terug op standaardwaarden.
         }
-        return new SyncSettings();
+        return new SyncSettings().Normalize();
     }
 
     public static void Save(SyncSettings settings)
     {
         Directory.CreateDirectory(DataDirectory);
         var tmp = SettingsFile + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(settings, JsonOptions));
+        File.WriteAllText(tmp, JsonSerializer.Serialize(settings.Normalize(), JsonOptions));
         File.Move(tmp, SettingsFile, overwrite: true);
     }
 

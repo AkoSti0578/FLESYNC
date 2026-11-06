@@ -22,10 +22,10 @@ public sealed class SyncEngineTests : IDisposable
         try { Directory.Delete(_root, true); } catch { }
     }
 
-    private SyncSettings Settings(SyncMode mode, bool mirror = false) =>
-        new() { SourcePath = A, TargetPath = B, Mode = mode, MirrorDeletes = mirror };
+    private SyncJob Settings(SyncMode mode, bool mirror = false) =>
+        new() { Id = 1, SourcePath = A, TargetPath = B, Mode = mode, MirrorDeletes = mirror };
 
-    private SyncResult Run(SyncSettings s) => SyncEngine.RunExclusive(s, "test");
+    private static SyncResult Run(SyncJob s) => SyncEngine.RunExclusive(s, "test");
 
     private static void Write(string path, string content, DateTime? time = null)
     {
@@ -142,7 +142,7 @@ public sealed class SyncEngineTests : IDisposable
     [Fact]
     public void RejectsNestedLocations()
     {
-        var s = new SyncSettings { SourcePath = A, TargetPath = Path.Combine(A, "inner"), Mode = SyncMode.OneWay };
+        var s = new SyncJob { SourcePath = A, TargetPath = Path.Combine(A, "inner"), Mode = SyncMode.OneWay };
         Assert.True(Run(s).Aborted);
     }
 
@@ -150,13 +150,83 @@ public sealed class SyncEngineTests : IDisposable
     public void Schedule_IntervalAndDaily()
     {
         var now = new DateTime(2026, 1, 1, 10, 0, 0);
-        var s = new SyncSettings { Schedule = ScheduleType.Interval, IntervalMinutes = 30 };
+        var s = new SyncJob { Schedule = ScheduleType.Interval, IntervalMinutes = 30 };
         Assert.Equal(now, s.GetNextRun(null, now));
         Assert.Equal(now.AddMinutes(30), s.GetNextRun(now, now));
 
-        s = new SyncSettings { Schedule = ScheduleType.Daily, DailyTime = "02:30" };
+        s = new SyncJob { Schedule = ScheduleType.Daily, DailyTime = "02:30" };
         Assert.Equal(new DateTime(2026, 1, 2, 2, 30, 0), s.GetNextRun(null, now));
         Assert.Equal(new DateTime(2026, 1, 1, 2, 30, 0), s.GetNextRun(null, new DateTime(2026, 1, 1, 1, 0, 0)));
         Assert.Equal(new DateTime(2026, 1, 2, 2, 30, 0), s.GetNextRun(new DateTime(2026, 1, 1, 2, 30, 5), now));
+    }
+
+    [Fact]
+    public void TwoJobs_AreIndependent()
+    {
+        var c = Path.Combine(_root, "C");
+        var d = Path.Combine(_root, "D");
+        Directory.CreateDirectory(c);
+        Directory.CreateDirectory(d);
+
+        var job1 = Settings(SyncMode.TwoWay);
+        var job2 = new SyncJob { Id = 2, SourcePath = c, TargetPath = d, Mode = SyncMode.TwoWay };
+
+        Write(Path.Combine(A, "one.txt"), "1", DateTime.UtcNow.AddHours(-1));
+        Write(Path.Combine(c, "two.txt"), "2", DateTime.UtcNow.AddHours(-1));
+        Write(Path.Combine(c, "stays.txt"), "s", DateTime.UtcNow.AddHours(-1));
+        Assert.True(Run(job1).Success);
+        Assert.True(Run(job2).Success);
+
+        Assert.True(File.Exists(Path.Combine(B, "one.txt")));
+        Assert.True(File.Exists(Path.Combine(d, "two.txt")));
+        Assert.False(File.Exists(Path.Combine(B, "two.txt")));
+
+        // Verwijderen in job 2 werkt met de eigen staat en raakt job 1 niet.
+        File.Delete(Path.Combine(d, "two.txt"));
+        Assert.True(Run(job2).Success);
+        Assert.False(File.Exists(Path.Combine(c, "two.txt")));
+        Assert.True(File.Exists(Path.Combine(A, "one.txt")));
+
+        Assert.True(File.Exists(SettingsStore.StateFile(1)));
+        Assert.True(File.Exists(SettingsStore.StateFile(2)));
+        Assert.NotNull(SyncStatus.Load(2).LastRun);
+    }
+
+    [Fact]
+    public void Settings_SaveLoadRoundTripWithTwoJobs()
+    {
+        var settings = new SyncSettings().Normalize();
+        settings.Job(1).SourcePath = A;
+        settings.Job(1).TargetPath = B;
+        settings.Job(2).Name = "Archief";
+        settings.Job(2).Enabled = true;
+        settings.Job(2).Mode = SyncMode.OneWay;
+        settings.Job(2).Schedule = ScheduleType.Daily;
+        settings.Job(2).DailyTime = "23:15";
+        SettingsStore.Save(settings);
+
+        var loaded = SettingsStore.Load();
+        Assert.Equal(SyncSettings.JobCount, loaded.Jobs.Count);
+        Assert.Equal(A, loaded.Job(1).SourcePath);
+        Assert.Equal("Archief", loaded.Job(2).DisplayName);
+        Assert.Equal(SyncMode.OneWay, loaded.Job(2).Mode);
+        Assert.Equal(new TimeSpan(23, 15, 0), loaded.Job(2).GetDailyTime());
+        Assert.False(loaded.Job(2).IsActive); // geen locaties
+    }
+
+    [Fact]
+    public void Settings_LegacySingleSyncFileBecomesJob1()
+    {
+        Directory.CreateDirectory(SettingsStore.DataDirectory);
+        File.WriteAllText(SettingsStore.SettingsFile,
+            $$"""{ "SourcePath": {{System.Text.Json.JsonSerializer.Serialize(A)}}, "TargetPath": {{System.Text.Json.JsonSerializer.Serialize(B)}}, "Mode": "OneWay", "IntervalMinutes": 42 }""");
+
+        var loaded = SettingsStore.Load();
+
+        Assert.Equal(2, loaded.Jobs.Count);
+        Assert.True(loaded.Job(1).IsActive);
+        Assert.Equal(SyncMode.OneWay, loaded.Job(1).Mode);
+        Assert.Equal(42, loaded.Job(1).IntervalMinutes);
+        Assert.False(loaded.Job(2).Enabled);
     }
 }

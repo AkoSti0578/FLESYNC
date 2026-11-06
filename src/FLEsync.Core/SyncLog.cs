@@ -70,7 +70,7 @@ public static class SyncLog
     }
 }
 
-/// <summary>Resultaat van de laatste synchronisatie, gedeeld tussen service en app.</summary>
+/// <summary>Resultaat van de laatste synchronisatie van een job, gedeeld tussen service en app.</summary>
 public sealed class SyncStatus
 {
     public DateTime? LastRun { get; set; }
@@ -78,25 +78,29 @@ public sealed class SyncStatus
     public string Summary { get; set; } = "";
     public string RunBy { get; set; } = "";
 
-    public static SyncStatus Load()
+    public static SyncStatus Load(int jobId)
     {
         try
         {
-            if (File.Exists(SettingsStore.StatusFile))
-                return JsonSerializer.Deserialize<SyncStatus>(File.ReadAllText(SettingsStore.StatusFile), SettingsStore.JsonOptions) ?? new();
+            var file = SettingsStore.StatusFile(jobId);
+            if (!File.Exists(file) && jobId == 1 && File.Exists(SettingsStore.LegacyStatusFile))
+                file = SettingsStore.LegacyStatusFile;
+            if (File.Exists(file))
+                return JsonSerializer.Deserialize<SyncStatus>(File.ReadAllText(file), SettingsStore.JsonOptions) ?? new();
         }
         catch { }
         return new SyncStatus();
     }
 
-    public void Save()
+    public void Save(int jobId)
     {
         try
         {
             Directory.CreateDirectory(SettingsStore.DataDirectory);
-            var tmp = SettingsStore.StatusFile + ".tmp";
+            var file = SettingsStore.StatusFile(jobId);
+            var tmp = file + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(this, SettingsStore.JsonOptions));
-            File.Move(tmp, SettingsStore.StatusFile, overwrite: true);
+            File.Move(tmp, file, overwrite: true);
         }
         catch { }
     }

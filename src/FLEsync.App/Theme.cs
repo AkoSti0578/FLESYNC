@@ -146,3 +146,72 @@ internal sealed class StatusPill : Control
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
     }
 }
+
+/// <summary>Tabblad in Normec-stijl voor het kiezen van een synchronisatie (titel + statusregel).</summary>
+internal sealed class JobTab : Control
+{
+    private bool _selected;
+    private string _subtitle = "";
+    private Color _dot = Theme.TextMuted;
+
+    public JobTab()
+    {
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+        Height = 58;
+        Width = 300;
+        Margin = new Padding(0, 0, 8, 0);
+        Font = Theme.CardTitle;
+    }
+
+    public bool Selected
+    {
+        get => _selected;
+        set { _selected = value; Invalidate(); }
+    }
+
+    public void SetSubtitle(string text, Color dot)
+    {
+        _subtitle = text;
+        _dot = dot;
+        Invalidate();
+    }
+
+    protected override void OnTextChanged(EventArgs e)
+    {
+        base.OnTextChanged(e);
+        Invalidate();
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var hover = ClientRectangle.Contains(PointToClient(Cursor.Position));
+        var back = _selected ? Theme.Card : hover ? ColorTranslator.FromHtml("#E8EEF5") : Theme.Background;
+
+        using (var path = Theme.RoundedRect(new Rectangle(0, 0, Width - 1, Height - 1), 6))
+        {
+            using var fill = new SolidBrush(back);
+            g.FillPath(fill, path);
+            using var pen = new Pen(_selected ? Theme.Border : Theme.Background);
+            g.DrawPath(pen, path);
+        }
+        if (_selected)
+        {
+            using var accent = new SolidBrush(Theme.Accent);
+            g.FillRectangle(accent, 1, Height - 4, Width - 2, 4);
+        }
+
+        TextRenderer.DrawText(g, Text, Font, new Rectangle(16, 7, Width - 24, 24),
+            _selected ? Theme.Navy : Theme.TextMuted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+        using (var dot = new SolidBrush(_dot))
+            g.FillEllipse(dot, 17, 37, 8, 8);
+        TextRenderer.DrawText(g, _subtitle, Theme.Subtitle, new Rectangle(30, 31, Width - 38, 20),
+            Theme.TextMuted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
+    }
+}

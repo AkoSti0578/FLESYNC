@@ -4,12 +4,21 @@ namespace FLEsync.Service;
 
 /// <summary>
 /// Achtergrondservice: leest periodiek de instellingen uit %ProgramData%\FLEsync\settings.json
-/// en voert de synchronisatie uit volgens het ingestelde schema. Wijzigingen in de instellingen
+/// en voert elke ingeschakelde synchronisatie uit volgens haar eigen schema. Synchronisaties lopen
+/// onafhankelijk van elkaar (een lange sync houdt de andere niet op). Wijzigingen in de instellingen
 /// worden automatisch opgepikt zonder herstart.
 /// </summary>
 public sealed class SyncWorker : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
+
+    private sealed class JobRuntime
+    {
+        public SyncJob Job = new();
+        public DateTime? LastRun;
+        public DateTime NextRun = DateTime.MaxValue;
+        public Task? Running;
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -17,9 +26,7 @@ public sealed class SyncWorker : BackgroundService
         SyncLog.Cleanup();
 
         var settingsStamp = DateTime.MinValue;
-        var settings = new SyncSettings();
-        DateTime? lastRun = null;
-        DateTime nextRun = DateTime.MaxValue;
+        var jobs = new Dictionary<int, JobRuntime>();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -27,28 +34,45 @@ public sealed class SyncWorker : BackgroundService
             if (stamp != settingsStamp)
             {
                 settingsStamp = stamp;
-                settings = SettingsStore.Load();
-                // Laatst bekende run gebruiken zodat een herstart niet direct een sync forceert bij dagelijks schema.
-                lastRun ??= SyncStatus.Load().LastRun;
-                nextRun = settings.IsConfigured ? settings.GetNextRun(lastRun, DateTime.Now) : DateTime.MaxValue;
-                SyncLog.Info(settings.IsConfigured
-                    ? $"Instellingen geladen ({settings.Describe()}). Volgende sync: {nextRun:dd-MM-yyyy HH:mm}"
-                    : "Nog geen locaties ingesteld; service wacht op configuratie.");
+                foreach (var job in SettingsStore.Load().Jobs)
+                {
+                    if (!jobs.TryGetValue(job.Id, out var rt))
+                    {
+                        // Laatst bekende run gebruiken zodat een herstart niet direct een sync forceert.
+                        rt = new JobRuntime { LastRun = SyncStatus.Load(job.Id).LastRun };
+                        jobs[job.Id] = rt;
+                    }
+                    rt.Job = job;
+                    rt.NextRun = job.IsActive ? job.GetNextRun(rt.LastRun, DateTime.Now) : DateTime.MaxValue;
+                    SyncLog.Info(job.IsActive
+                        ? $"[{job.DisplayName}] Ingesteld ({job.Describe()}). Volgende sync: {Max(rt.NextRun, DateTime.Now):dd-MM-yyyy HH:mm}"
+                        : $"[{job.DisplayName}] {(job.Enabled ? "Nog niet ingesteld" : "Uitgeschakeld")}.");
+                }
             }
 
-            if (settings.IsConfigured && DateTime.Now >= nextRun)
+            foreach (var rt in jobs.Values)
             {
-                await Task.Run(() => SyncEngine.RunExclusive(settings, "service", stoppingToken), stoppingToken)
-                    .ContinueWith(_ => { }, TaskScheduler.Default);
-                lastRun = DateTime.Now;
-                nextRun = settings.GetNextRun(lastRun, DateTime.Now);
-                SyncLog.Info($"Volgende sync: {nextRun:dd-MM-yyyy HH:mm}");
+                if (rt.Running is { IsCompleted: false }) continue;
+                if (!rt.Job.IsActive || DateTime.Now < rt.NextRun) continue;
+
+                var job = rt.Job;
+                rt.Running = Task.Run(() =>
+                {
+                    SyncEngine.RunExclusive(job, "service", stoppingToken);
+                    rt.LastRun = DateTime.Now;
+                    rt.NextRun = job.GetNextRun(rt.LastRun, DateTime.Now);
+                    SyncLog.Info($"[{job.DisplayName}] Volgende sync: {rt.NextRun:dd-MM-yyyy HH:mm}");
+                }, stoppingToken);
             }
 
             try { await Task.Delay(PollInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
 
+        var running = jobs.Values.Select(j => j.Running).OfType<Task>().ToArray();
+        try { await Task.WhenAll(running).WaitAsync(TimeSpan.FromSeconds(20)); } catch { }
         SyncLog.Info("FLEsync-service gestopt.");
     }
+
+    private static DateTime Max(DateTime a, DateTime b) => a > b ? a : b;
 }

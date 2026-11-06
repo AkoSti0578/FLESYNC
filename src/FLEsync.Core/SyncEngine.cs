@@ -33,24 +33,28 @@ public sealed class SyncEngine
     private static readonly TimeSpan TimeTolerance = TimeSpan.FromSeconds(2); // FAT/SMB-precisie
     private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
 
-    private readonly SyncSettings _settings;
+    private readonly SyncJob _settings;
     private readonly string _source;
     private readonly string _target;
+    private readonly string _tag;
 
-    public SyncEngine(SyncSettings settings)
+    public SyncEngine(SyncJob settings)
     {
         _settings = settings;
+        _tag = $"[{settings.DisplayName}] ";
         _source = Normalize(settings.SourcePath);
         _target = Normalize(settings.TargetPath);
     }
 
     /// <summary>
-    /// Voert een synchronisatie uit. Gebruikt een lock-bestand zodat app en service niet tegelijk syncen.
+    /// Voert een synchronisatie uit. Gebruikt een lock-bestand per job zodat app en service
+    /// dezelfde job niet tegelijk syncen.
     /// </summary>
-    public static SyncResult RunExclusive(SyncSettings settings, string runBy, CancellationToken ct = default)
+    public static SyncResult RunExclusive(SyncJob settings, string runBy, CancellationToken ct = default)
     {
         Directory.CreateDirectory(SettingsStore.DataDirectory);
-        var lockPath = Path.Combine(SettingsStore.DataDirectory, "sync.lock");
+        var lockPath = SettingsStore.LockFile(settings.Id);
+        var tag = $"[{settings.DisplayName}] ";
         FileStream? lockFile;
         try
         {
@@ -58,12 +62,12 @@ public sealed class SyncEngine
         }
         catch (IOException)
         {
-            return new SyncResult { Aborted = true, AbortReason = "Er loopt al een synchronisatie." };
+            return new SyncResult { Aborted = true, AbortReason = "Deze synchronisatie loopt al." };
         }
 
         using (lockFile)
         {
-            SyncLog.Info($"Synchronisatie gestart ({runBy}): {settings.SourcePath} <-> {settings.TargetPath} [{settings.Describe()}]");
+            SyncLog.Info(tag + $"Synchronisatie gestart ({runBy}): {settings.SourcePath} <-> {settings.TargetPath} [{settings.Describe()}]");
             SyncResult result;
             try
             {
@@ -75,12 +79,12 @@ public sealed class SyncEngine
             }
             catch (Exception ex)
             {
-                SyncLog.Error(ex.ToString());
+                SyncLog.Error(tag + ex);
                 result = new SyncResult { Aborted = true, AbortReason = ex.Message };
             }
 
-            if (result.Success) SyncLog.Info("Synchronisatie klaar: " + result);
-            else SyncLog.Error("Synchronisatie klaar met problemen: " + result);
+            if (result.Success) SyncLog.Info(tag + "Synchronisatie klaar: " + result);
+            else SyncLog.Error(tag + "Synchronisatie klaar met problemen: " + result);
 
             new SyncStatus
             {
@@ -88,7 +92,7 @@ public sealed class SyncEngine
                 Success = result.Success,
                 Summary = result.ToString(),
                 RunBy = runBy
-            }.Save();
+            }.Save(settings.Id);
             return result;
         }
     }
@@ -248,7 +252,7 @@ public sealed class SyncEngine
                     {
                         result.Conflicts++;
                         if (aNewer) result.CopiedToTarget++; else result.CopiedToSource++;
-                        SyncLog.Warn($"Conflict in {rel}: nieuwste versie ({(aNewer ? "bron" : "doel")}) behouden, oudere als conflict-kopie bewaard.");
+                        SyncLog.Warn(_tag + $"Conflict in {rel}: nieuwste versie ({(aNewer ? "bron" : "doel")}) behouden, oudere als conflict-kopie bewaard.");
                     }
                 }
             }
@@ -369,7 +373,7 @@ public sealed class SyncEngine
         File.Copy(path, conflict, overwrite: true);
     }
 
-    private static bool Try(SyncResult result, string what, Action action)
+    private bool Try(SyncResult result, string what, Action action)
     {
         try
         {
@@ -379,7 +383,7 @@ public sealed class SyncEngine
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             result.Errors++;
-            SyncLog.Warn($"Mislukt: {what} - {ex.Message}");
+            SyncLog.Warn(_tag + $"Mislukt: {what} - {ex.Message}");
             return false;
         }
     }
@@ -414,7 +418,7 @@ public sealed class SyncEngine
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                SyncLog.Warn($"Map niet leesbaar: {dir} - {ex.Message}");
+                SyncLog.Warn(_tag + $"Map niet leesbaar: {dir} - {ex.Message}");
                 continue;
             }
 
@@ -462,25 +466,29 @@ public sealed class SyncEngine
     {
         try
         {
-            if (File.Exists(SettingsStore.StateFile))
+            var file = SettingsStore.StateFile(_settings.Id);
+            if (!File.Exists(file) && _settings.Id == 1 && File.Exists(SettingsStore.LegacyStateFile))
+                file = SettingsStore.LegacyStateFile; // overname van versie 1.0
+            if (File.Exists(file))
             {
-                var s = JsonSerializer.Deserialize<SyncStateData>(File.ReadAllText(SettingsStore.StateFile), SettingsStore.JsonOptions);
+                var s = JsonSerializer.Deserialize<SyncStateData>(File.ReadAllText(file), SettingsStore.JsonOptions);
                 if (s != null && PathComparer.Equals(s.SourcePath, _source) && PathComparer.Equals(s.TargetPath, _target))
                     return s.WithComparer();
             }
         }
         catch (Exception ex)
         {
-            SyncLog.Warn("Staatbestand onleesbaar, wordt opnieuw opgebouwd: " + ex.Message);
+            SyncLog.Warn(_tag + "Staatbestand onleesbaar, wordt opnieuw opgebouwd: " + ex.Message);
         }
         return new SyncStateData { SourcePath = _source, TargetPath = _target };
     }
 
-    private static void SaveState(SyncStateData state)
+    private void SaveState(SyncStateData state)
     {
-        var tmp = SettingsStore.StateFile + ".tmp";
+        var file = SettingsStore.StateFile(_settings.Id);
+        var tmp = file + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(state, SettingsStore.JsonOptions));
-        File.Move(tmp, SettingsStore.StateFile, overwrite: true);
+        File.Move(tmp, file, overwrite: true);
     }
 
     // ---------------------------------------------------------------- helpers
