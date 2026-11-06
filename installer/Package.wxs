@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="FLEsync"
+           Manufacturer="Normec Group"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="6C2B8E1A-3F47-4D3B-9B0E-5A1F7C2D9E41"
+           Scope="perMachine"
+           Language="1043"
+           Codepage="1252">
+
+    <SummaryInformation Description="FLEsync – bestandssynchronisatie (Normec Group)" Manufacturer="Normec Group" />
+
+    <MajorUpgrade DowngradeErrorMessage="Er is al een nieuwere versie van FLEsync geïnstalleerd." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Uiterlijk: Normec-kleuren in de installatiewizard -->
+    <Icon Id="FLEsyncIcon" SourceFile="$(var.AssetsDir)\flesync.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FLEsyncIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.normecgroup.com" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetsDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetsDir)\dialog.bmp" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetsDir)\license.rtf" />
+
+    <!-- Mappen -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="FLEsync" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="FLEsync" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="FLEsync" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="DataFolder" />
+      <ComponentRef Id="ServiceHousekeeping" />
+    </Feature>
+
+    <!-- Alle gepubliceerde bestanden (app + service, self-contained .NET 8) -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PublishDir)\**" />
+    </ComponentGroup>
+
+    <!-- Gedeelde configuratiemap: gebruikers mogen instellingen wijzigen, service (SYSTEM) leest ze. -->
+    <Component Id="DataFolder" Directory="DATAFOLDER">
+      <CreateFolder>
+        <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)" />
+      </CreateFolder>
+      <RegistryValue Root="HKLM" Key="Software\Normec Group\FLEsync" Name="DataDir" Value="[DATAFOLDER]" Type="string" KeyPath="yes" />
+    </Component>
+
+    <!--
+      De service wordt vanuit de app geïnstalleerd (knop "Als service instellen").
+      Bij upgrade wordt hij gestopt zodat bestanden vervangen kunnen worden; bij verwijderen
+      van FLEsync wordt de service ook verwijderd.
+    -->
+    <Component Id="ServiceHousekeeping" Directory="INSTALLFOLDER">
+      <RegistryValue Root="HKLM" Key="Software\Normec Group\FLEsync" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+      <ServiceControl Id="FLEsyncServiceControl" Name="FLEsync" Stop="both" Remove="uninstall" Wait="yes" />
+    </Component>
+
+    <!-- Na een upgrade de service (indien aanwezig) weer starten. Fouten worden genegeerd. -->
+    <CustomAction Id="RestartFLEsyncService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[System64Folder]sc.exe&quot; start FLEsync"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RestartFLEsyncService" Before="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <!-- Snelkoppelingen -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="FLEsyncStartMenu" Name="FLEsync" Description="Bestandslocaties synchroniseren"
+                  Target="[INSTALLFOLDER]FLEsync.exe" WorkingDirectory="INSTALLFOLDER" Icon="FLEsyncIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Normec Group\FLEsync" Name="StartMenuShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut">
+        <Shortcut Id="FLEsyncDesktop" Name="FLEsync" Description="Bestandslocaties synchroniseren"
+                  Target="[INSTALLFOLDER]FLEsync.exe" WorkingDirectory="INSTALLFOLDER" Icon="FLEsyncIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Normec Group\FLEsync" Name="DesktopShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Wizard + "FLEsync nu starten" op het laatste scherm, zodat direct het instelscherm verschijnt -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="FLEsync nu starten" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="SetLaunchTarget" Property="WixShellExecTarget" Value="[INSTALLFOLDER]FLEsync.exe" />
+    <CustomAction Id="LaunchFLEsync" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" />
+
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="SetLaunchTarget" Order="1"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchFLEsync" Order="2"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

@@ -1,0 +1,21 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!--
+    Bouwt FLEsync-<versie>-x64.msi uit de gepubliceerde bestanden.
+    Eerst publiceren (zie build.ps1), daarna:
+      dotnet build installer\FLEsync.Installer.wixproj -c Release -p:PublishDir=<pad naar publish-map>
+  -->
+  <PropertyGroup>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)..\publish\FLEsync</PublishDir>
+    <OutputName>FLEsync-$(Version)-x64</OutputName>
+    <DefineConstants>PublishDir=$(PublishDir);ProductVersion=$(Version);AssetsDir=$(MSBuildThisFileDirectory)..\assets</DefineConstants>
+    <!-- Nederlandstalige installatiewizard -->
+    <Cultures>nl-NL</Cultures>
+    <!-- Snelkoppelingen voor alle gebruikers met HKLM-keypath (perMachine) -->
+    <SuppressIces>ICE38;ICE43;ICE57</SuppressIces>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>
