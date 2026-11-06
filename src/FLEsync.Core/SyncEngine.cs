@@ -11,6 +11,7 @@ public sealed class SyncResult
     public int Conflicts { get; set; }
     public int Errors { get; set; }
     public bool Aborted { get; set; }
+    public bool SourceEmptied { get; set; }
     public string? AbortReason { get; set; }
     public TimeSpan Duration { get; set; }
 
@@ -18,6 +19,8 @@ public sealed class SyncResult
 
     public override string ToString() => Aborted
         ? $"Afgebroken: {AbortReason}"
+        : SourceEmptied
+        ? $"Doel was leeg: bron leeggemaakt ({Deleted} bestand(en) verwijderd, {Errors} fout(en)) in {Duration.TotalSeconds:0.0}s"
         : $"{CopiedToTarget} naar doel, {CopiedToSource} naar bron, {Deleted} verwijderd, " +
           $"{Conflicts} conflict(en), {Errors} fout(en) in {Duration.TotalSeconds:0.0}s";
 }
@@ -140,7 +143,7 @@ public sealed class SyncEngine
 
         if (!Directory.Exists(_target))
         {
-            if (HasState() && _settings.Mode == SyncMode.TwoWay)
+            if (HasState() && (_settings.Mode == SyncMode.TwoWay || _settings.EmptySourceWhenTargetEmpty))
                 return Abort(result, $"Doellocatie niet bereikbaar: {_target}");
             try { Directory.CreateDirectory(_target); }
             catch (Exception ex) { return Abort(result, $"Doellocatie kan niet worden aangemaakt: {ex.Message}"); }
@@ -159,8 +162,16 @@ public sealed class SyncEngine
 
     private void RunOneWay(SyncResult result, CancellationToken ct)
     {
+        var state = LoadState();
         var src = Scan(_source);
         var dst = Scan(_target);
+
+        if (ShouldEmptySource(state, src, dst))
+        {
+            EmptySource(result, src, ct);
+            SaveState(BuildState(Scan(_source), Scan(_target), state, new HashSet<string>(PathComparer)));
+            return;
+        }
 
         if (_settings.MirrorDeletes && src.Files.Count == 0 && src.Dirs.Count == 0 && dst.Files.Count > 0)
         {
@@ -180,8 +191,15 @@ public sealed class SyncEngine
                 result.CopiedToTarget++;
         }
 
-        if (!_settings.MirrorDeletes) return;
+        if (_settings.MirrorDeletes)
+            MirrorTarget(result, src, dst, ct);
 
+        // Staat bijhouden (o.a. voor "bron leegmaken als doel leeg is" en bij wisselen naar tweerichtings).
+        SaveState(BuildState(Scan(_source), Scan(_target), state, new HashSet<string>(PathComparer)));
+    }
+
+    private void MirrorTarget(SyncResult result, Snapshot src, Snapshot dst, CancellationToken ct)
+    {
         foreach (var rel in dst.Files.Keys.Where(k => !src.Files.ContainsKey(k)).ToList())
         {
             ct.ThrowIfCancellationRequested();
@@ -200,6 +218,14 @@ public sealed class SyncEngine
         var state = LoadState();
         var a = Scan(_source);
         var b = Scan(_target);
+
+        // Optie: doel is bewust leeggemaakt -> bron ook leegmaken.
+        if (ShouldEmptySource(state, a, b))
+        {
+            EmptySource(result, a, ct);
+            SaveState(BuildState(Scan(_source), Scan(_target), state, new HashSet<string>(PathComparer)));
+            return;
+        }
 
         // Veiligheid: als een kant ineens helemaal leeg is terwijl er eerder bestanden waren,
         // is die locatie waarschijnlijk niet goed bereikbaar. Dan niets verwijderen.
@@ -273,19 +299,53 @@ public sealed class SyncEngine
         SyncDirectories(result, b.Dirs, a.Dirs, state.Dirs, _target, _source);
 
         // Nieuwe staat opbouwen op basis van de werkelijke situatie na de sync.
-        var a2 = Scan(_source);
-        var b2 = Scan(_target);
+        SaveState(BuildState(Scan(_source), Scan(_target), state, failed));
+    }
+
+    /// <summary>
+    /// Staat = bestanden en mappen die na de run aan beide kanten gelijk zijn. Voor bestanden waarvan de
+    /// bewerking mislukte, blijft de oude staat behouden zodat ze de volgende keer correct worden opgepakt.
+    /// </summary>
+    private SyncStateData BuildState(Snapshot a2, Snapshot b2, SyncStateData old, HashSet<string> failed)
+    {
         var newState = new SyncStateData { SourcePath = _source, TargetPath = _target };
         foreach (var (rel, fa2) in a2.Files)
             if (b2.Files.TryGetValue(rel, out var fb2) && Same(fa2, fb2))
                 newState.Files[rel] = fa2;
         foreach (var rel in failed)
-            if (!newState.Files.ContainsKey(rel) && state.Files.TryGetValue(rel, out var old))
-                newState.Files[rel] = old;
+            if (!newState.Files.ContainsKey(rel) && old.Files.TryGetValue(rel, out var prev))
+                newState.Files[rel] = prev;
         foreach (var d in a2.Dirs)
             if (b2.Dirs.Contains(d)) newState.Dirs.Add(d);
+        return newState;
+    }
 
-        SaveState(newState);
+    // ---------------------------------------------------------------- doel leeg -> bron leeg
+
+    /// <summary>
+    /// True als de optie aan staat, het doel bereikbaar maar leeg is (geen bestanden) en er bij de vorige
+    /// sync wél gesynchroniseerde bestanden waren. Bij een eerste sync wordt de bron dus nooit geleegd.
+    /// </summary>
+    private bool ShouldEmptySource(SyncStateData state, Snapshot a, Snapshot b) =>
+        _settings.EmptySourceWhenTargetEmpty
+        && state.Files.Count > 0
+        && b.Files.Count == 0
+        && Directory.Exists(_target)
+        && (a.Files.Count > 0 || a.Dirs.Count > 0);
+
+    /// <summary>Verwijdert alle (niet-uitgesloten) bestanden en mappen uit de bron.</summary>
+    private void EmptySource(SyncResult result, Snapshot a, CancellationToken ct)
+    {
+        SyncLog.Warn(_tag + $"Doel {_target} is leeg; bron {_source} wordt leeggemaakt (instelling 'bron leegmaken als doel leeg is').");
+        foreach (var rel in a.Files.Keys.ToList())
+        {
+            ct.ThrowIfCancellationRequested();
+            if (Try(result, $"verwijderen {rel}", () => DeleteFile(Path.Combine(_source, rel))))
+                result.Deleted++;
+        }
+        foreach (var dir in a.Dirs.OrderByDescending(d => d.Length))
+            Try(result, $"map verwijderen {dir}", () => DeleteDirIfEmpty(Path.Combine(_source, dir)));
+        result.SourceEmptied = true;
     }
 
     /// <summary>Bestand bestaat alleen aan één kant: nieuw (kopiëren) of aan de andere kant verwijderd.</summary>

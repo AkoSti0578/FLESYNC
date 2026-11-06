@@ -19,13 +19,17 @@ als **Windows-service** op de achtergrond.
     Bij een conflict (beide kanten gewijzigd) wint de nieuwste versie; de oudere wordt bewaard als
     `naam (conflict COMPUTER datum).ext`.
   - *One-way*: alleen van A naar B. Optioneel *spiegelen*: wat uit A verdwijnt, wordt ook uit B verwijderd.
+- **Bron leegmaken als doel leeg is** (optioneel, per synchronisatie, standaard uit): wordt B (doel) bewust
+  leeggemaakt, dan wordt A (bron) bij de volgende run ook leeggemaakt. Dit gebeurt alleen als B bereikbaar is
+  en bij de vorige sync wel bestanden bevatte (nooit bij de eerste sync); uitgesloten bestanden blijven staan.
 - **Synchronisatietijd per synchronisatie**: elke *N* minuten of dagelijks op een vast tijdstip.
 - **Knop "Als service instellen"**: installeert en start de Windows-service `FLEsync`
   (vraagt één keer om beheerdersrechten via UAC). Daarna ook starten/stoppen/verwijderen vanuit de app.
 - **Nu synchroniseren**: per synchronisatie, of beide tegelijk met *Alles nu synchroniseren*.
 - **Waarschuwing bij overlap**: als beide synchronisaties dezelfde of geneste mappen gebruiken.
 - **Uitsluitingen**: patronen zoals `*.tmp; ~$*; Thumbs.db`.
-- **Veiligheid**: sync wordt afgebroken als een locatie onbereikbaar of onverwacht leeg is (voorkomt massaal
+- **Veiligheid**: sync wordt afgebroken als een locatie onbereikbaar of onverwacht leeg is (tenzij de optie
+  hierboven bewust is ingeschakeld) (voorkomt massaal
   verwijderen), bron en doel mogen niet in elkaar liggen, app en service syncen nooit tegelijk.
 - **Logboek** in het scherm en in `%ProgramData%\FLEsync\logs` (30 dagen bewaard).
 - **Normec Group-uiterlijk**: marineblauwe header, blauw/cyaan accenten, Segoe UI; ook in de installatiewizard.

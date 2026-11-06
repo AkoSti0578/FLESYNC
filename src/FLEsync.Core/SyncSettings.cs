@@ -36,6 +36,12 @@ public sealed class SyncJob
     /// <summary>Alleen bij one-way: verwijder bestanden in het doel die niet (meer) in de bron staan.</summary>
     public bool MirrorDeletes { get; set; }
 
+    /// <summary>
+    /// Als het doel (B) leeg is terwijl er bij de vorige sync wel bestanden waren, wordt de bron (A)
+    /// ook leeggemaakt. Werkt bij tweerichtings en one-way. Standaard uit.
+    /// </summary>
+    public bool EmptySourceWhenTargetEmpty { get; set; }
+
     public ScheduleType Schedule { get; set; } = ScheduleType.Interval;
 
     /// <summary>Interval in minuten bij <see cref="ScheduleType.Interval"/>.</summary>
@@ -88,7 +94,7 @@ public sealed class SyncJob
         var when = Schedule == ScheduleType.Interval
             ? $"elke {IntervalMinutes} min"
             : $"dagelijks om {GetDailyTime():hh\\:mm}";
-        return $"{mode}, {when}";
+        return EmptySourceWhenTargetEmpty ? $"{mode}, {when}, bron leeg als doel leeg" : $"{mode}, {when}";
     }
 }
 

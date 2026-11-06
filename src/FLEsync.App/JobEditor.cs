@@ -20,6 +20,7 @@ internal sealed class JobEditor : UserControl
     private readonly RadioButton _twoWay = Radio("Tweerichtings – A en B gelijk houden (A ⇄ B)");
     private readonly RadioButton _oneWay = Radio("One-way – alleen van A naar B (A → B)");
     private readonly CheckBox _mirror = new() { Text = "Bestanden die uit A verdwijnen ook in B verwijderen (spiegelen)", AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(22, 2, 0, 2) };
+    private readonly CheckBox _emptySource = new() { Text = "Als B (doel) leeg is, ook A (bron) leegmaken", AutoSize = true, ForeColor = Theme.Danger, Margin = new Padding(0, 8, 0, 2) };
     private readonly TextBox _exclude = NewTextBox();
 
     // Planning
@@ -128,6 +129,7 @@ internal sealed class JobEditor : UserControl
         dir.Controls.Add(_twoWay);
         dir.Controls.Add(_oneWay);
         dir.Controls.Add(_mirror);
+        dir.Controls.Add(_emptySource);
         dir.Controls.Add(new Label { Text = "Uitsluiten (gescheiden door ;)", AutoSize = true, ForeColor = Theme.TextMuted, Margin = new Padding(0, 10, 0, 2) });
         _exclude.Dock = DockStyle.None;
         _exclude.Width = 360;
@@ -152,7 +154,7 @@ internal sealed class JobEditor : UserControl
         plan.SetColumnSpan(_nextRun, 3);
         planCard.Controls.Add(plan);
 
-        _detailControls.AddRange(new Control[] { _twoWay, _oneWay, _exclude, _interval, _daily });
+        _detailControls.AddRange(new Control[] { _twoWay, _oneWay, _emptySource, _exclude, _interval, _daily });
 
         row.Controls.Add(dirCard, 0, 0);
         row.Controls.Add(planCard, 1, 0);
@@ -170,6 +172,22 @@ internal sealed class JobEditor : UserControl
         foreach (var r in new[] { _twoWay, _oneWay, _interval, _daily })
             r.CheckedChanged += (_, _) => { UpdateEnabledState(); OnChanged(); };
         _mirror.CheckedChanged += (_, _) => OnChanged();
+        _emptySource.CheckedChanged += (_, _) =>
+        {
+            if (!_loading && _emptySource.Checked && MessageBox.Show(FindForm(),
+                    "Met deze instelling wordt locatie A (bron) volledig leeggemaakt zodra locatie B (doel) leeg is.\n\n" +
+                    "Dit gebeurt alleen als B bereikbaar is en bij de vorige synchronisatie wél bestanden bevatte; " +
+                    "uitgesloten bestanden blijven staan. Verwijderde bestanden komen niet in de prullenbak.\n\n" +
+                    "Weet je zeker dat je dit wilt inschakelen?",
+                    "FLEsync – bron leegmaken", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                _loading = true;
+                _emptySource.Checked = false;
+                _loading = false;
+                return;
+            }
+            OnChanged();
+        };
         _enabled.CheckedChanged += (_, _) => { UpdateEnabledState(); OnChanged(); };
         SyncNowButton.Click += (_, _) => SyncNowRequested?.Invoke(this, EventArgs.Empty);
     }
@@ -191,6 +209,7 @@ internal sealed class JobEditor : UserControl
         _twoWay.Checked = job.Mode == SyncMode.TwoWay;
         _oneWay.Checked = job.Mode == SyncMode.OneWay;
         _mirror.Checked = job.MirrorDeletes;
+        _emptySource.Checked = job.EmptySourceWhenTargetEmpty;
         _exclude.Text = string.Join("; ", job.ExcludePatterns);
         _interval.Checked = job.Schedule == ScheduleType.Interval;
         _daily.Checked = job.Schedule == ScheduleType.Daily;
@@ -209,6 +228,7 @@ internal sealed class JobEditor : UserControl
         TargetPath = _target.Text.Trim(),
         Mode = _oneWay.Checked ? SyncMode.OneWay : SyncMode.TwoWay,
         MirrorDeletes = _oneWay.Checked && _mirror.Checked,
+        EmptySourceWhenTargetEmpty = _emptySource.Checked,
         Schedule = _daily.Checked ? ScheduleType.Daily : ScheduleType.Interval,
         IntervalMinutes = (int)_minutes.Value,
         DailyTime = _time.Value.ToString("HH:mm"),

@@ -229,4 +229,96 @@ public sealed class SyncEngineTests : IDisposable
         Assert.Equal(42, loaded.Job(1).IntervalMinutes);
         Assert.False(loaded.Job(2).Enabled);
     }
+
+    private void SeedAndSync(SyncJob job)
+    {
+        Write(Path.Combine(A, "a.txt"), "a", DateTime.UtcNow.AddHours(-1));
+        Write(Path.Combine(A, "sub", "b.txt"), "b", DateTime.UtcNow.AddHours(-1));
+        Assert.True(Run(job).Success);
+        Assert.True(File.Exists(Path.Combine(B, "sub", "b.txt")));
+    }
+
+    private void EmptyTarget()
+    {
+        foreach (var e in Directory.EnumerateFileSystemEntries(B))
+            if (Directory.Exists(e)) Directory.Delete(e, true); else File.Delete(e);
+    }
+
+    [Theory]
+    [InlineData(SyncMode.TwoWay)]
+    [InlineData(SyncMode.OneWay)]
+    public void EmptyTarget_EmptiesSource_WhenOptionEnabled(SyncMode mode)
+    {
+        var job = Settings(mode);
+        job.EmptySourceWhenTargetEmpty = true;
+        SeedAndSync(job);
+        Write(Path.Combine(A, "skip.tmp"), "excluded");
+
+        EmptyTarget();
+        var r = Run(job);
+
+        Assert.True(r.Success, r.ToString());
+        Assert.True(r.SourceEmptied);
+        Assert.False(File.Exists(Path.Combine(A, "a.txt")));
+        Assert.False(Directory.Exists(Path.Combine(A, "sub")));
+        Assert.True(File.Exists(Path.Combine(A, "skip.tmp"))); // uitgesloten blijft staan
+
+        // Daarna gewoon verder: nieuw bestand in A gaat weer naar B.
+        Write(Path.Combine(A, "new.txt"), "n");
+        Assert.True(Run(job).Success);
+        Assert.True(File.Exists(Path.Combine(B, "new.txt")));
+    }
+
+    [Fact]
+    public void EmptyTarget_TwoWayWithoutOption_StillAborts()
+    {
+        var job = Settings(SyncMode.TwoWay);
+        SeedAndSync(job);
+        EmptyTarget();
+
+        var r = Run(job);
+
+        Assert.True(r.Aborted);
+        Assert.True(File.Exists(Path.Combine(A, "a.txt")));
+    }
+
+    [Fact]
+    public void EmptyTarget_OneWayWithoutOption_RecopiesFiles()
+    {
+        var job = Settings(SyncMode.OneWay);
+        SeedAndSync(job);
+        EmptyTarget();
+
+        Assert.True(Run(job).Success);
+        Assert.True(File.Exists(Path.Combine(A, "a.txt")));
+        Assert.True(File.Exists(Path.Combine(B, "a.txt")));
+    }
+
+    [Fact]
+    public void EmptyTarget_FirstSync_NeverEmptiesSource()
+    {
+        var job = Settings(SyncMode.OneWay);
+        job.EmptySourceWhenTargetEmpty = true;
+        Write(Path.Combine(A, "a.txt"), "a");
+
+        var r = Run(job);
+
+        Assert.False(r.SourceEmptied);
+        Assert.True(File.Exists(Path.Combine(A, "a.txt")));
+        Assert.True(File.Exists(Path.Combine(B, "a.txt")));
+    }
+
+    [Fact]
+    public void MissingTarget_WithOption_AbortsInsteadOfEmptyingSource()
+    {
+        var job = Settings(SyncMode.OneWay);
+        job.EmptySourceWhenTargetEmpty = true;
+        SeedAndSync(job);
+        Directory.Delete(B, true); // bv. share niet bereikbaar
+
+        var r = Run(job);
+
+        Assert.True(r.Aborted);
+        Assert.True(File.Exists(Path.Combine(A, "a.txt")));
+    }
 }

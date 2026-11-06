@@ -12,6 +12,7 @@ bestandslocaties uitvoert. Elke synchronisatie heeft een eigen bron (A), doel (B
 
 - **Tweerichtings (A ⇄ B):** nieuwe, gewijzigde en verwijderde bestanden worden in beide richtingen doorgevoerd.
 - **One-way (A → B):** alleen van A naar B. Optioneel **spiegelen**: wat uit A verdwijnt, wordt ook uit B verwijderd.
+- **Optioneel: bron leegmaken als het doel leeg is.** Wordt B leeggemaakt, dan wordt A ook leeggemaakt.
 - **Schema per synchronisatie:** elke *N* minuten (1 – 10080), of dagelijks op een vast tijdstip.
 - De synchronisaties worden uitgevoerd door de Windows-service **FLEsync**. Daarnaast kan vanuit de app
   handmatig worden gesynchroniseerd.
@@ -43,7 +44,7 @@ bestandslocaties uitvoert. Elke synchronisatie heeft een eigen bron (A), doel (B
 | Bestand | Inhoud |
 | --- | --- |
 | `settings.json` | Instellingen van beide synchronisaties |
-| `state-1.json`, `state-2.json` | Staat van de vorige run per synchronisatie (nodig om verwijderingen bij tweerichtings-sync te herkennen) |
+| `state-1.json`, `state-2.json` | Staat van de vorige run per synchronisatie: bestanden die aan beide kanten gelijk waren. Nodig om verwijderingen te herkennen en voor "bron leegmaken als doel leeg is" |
 | `status-1.json`, `status-2.json` | Laatste resultaat per synchronisatie (tijd, gelukt/mislukt, samenvatting, uitgevoerd door) |
 | `sync-1.lock`, `sync-2.lock` | Lock-bestand; voorkomt dat app en service dezelfde synchronisatie tegelijk uitvoeren |
 | `logs\flesync-JJJJMMDD.log` | Dagelijks logbestand. Logs ouder dan 30 dagen worden opgeruimd bij het starten van de service |
@@ -118,6 +119,7 @@ Het scherm heeft twee tabbladen: **Synchronisatie 1** en **Synchronisatie 2**. P
 | Naam | Vrije naam, bijv. "Archief" (verschijnt in tabblad en logboek) |
 | Locatie A / Locatie B | Map of netwerkpad. Bij one-way is A de bron en B het doel |
 | Richting | Tweerichtings of One-way (+ optioneel spiegelen) |
+| *Als B (doel) leeg is, ook A (bron) leegmaken* | Standaard uit. Bij inschakelen volgt een bevestigingsvraag. Zie §6 |
 | Uitsluiten | Patronen gescheiden door `;`. Standaard: `*.tmp; ~$*; Thumbs.db; desktop.ini` |
 | Synchronisatietijd | Elke *N* minuten, of dagelijks om *HH:mm* |
 
@@ -148,6 +150,7 @@ Wijzigingen worden binnen **±10 seconden** door een draaiende service overgenom
       "TargetPath": "\\\\fileserver01\\projecten$",
       "Mode": "TwoWay",
       "MirrorDeletes": false,
+      "EmptySourceWhenTargetEmpty": false,
       "Schedule": "Interval",
       "IntervalMinutes": 15,
       "DailyTime": "02:00",
@@ -161,6 +164,7 @@ Wijzigingen worden binnen **±10 seconden** door een draaiende service overgenom
       "TargetPath": "\\\\backup01\\archief-kopie",
       "Mode": "OneWay",
       "MirrorDeletes": true,
+      "EmptySourceWhenTargetEmpty": true,
       "Schedule": "Daily",
       "IntervalMinutes": 15,
       "DailyTime": "23:30",
@@ -202,8 +206,26 @@ Bestanden die aan beide kanten bestaan maar verschillen, worden als conflict beh
 - **Zonder spiegelen:** in B wordt nooit iets verwijderd.
 - **Met spiegelen:** bestanden en mappen in B die niet in A staan, worden verwijderd (uitgesloten patronen niet).
 
+### Optie: bron leegmaken als het doel leeg is
+Werkt bij tweerichtings en bij one-way. Staat standaard **uit**.
+
+Als B (doel) **geen bestanden** meer bevat, worden in A (bron) alle bestanden en mappen verwijderd, behalve
+uitgesloten patronen. De bestanden gaan **niet** naar de prullenbak. Dit gebeurt alleen als **alle** voorwaarden gelden:
+1. De optie staat aan voor deze synchronisatie.
+2. Map B bestaat en is bereikbaar. Is B (of de share) niet bereikbaar, dan wordt de sync afgebroken en blijft A intact.
+3. Bij de vorige sync waren er wél gesynchroniseerde bestanden (`state-N.json` niet leeg). **Bij een eerste sync
+   wordt A dus nooit leeggemaakt.**
+
+Logregel: `[WARN] [Naam] Doel … is leeg; bron … wordt leeggemaakt …`. Resultaat in de app:
+"Doel was leeg: bron leeggemaakt (… bestand(en) verwijderd)". Daarna werkt de synchronisatie weer normaal:
+nieuwe bestanden in A gaan weer naar B.
+
+Staat de optie **uit**, dan geldt: bij tweerichtings wordt de sync afgebroken (zie hieronder), bij one-way
+worden de bestanden opnieuw van A naar B gekopieerd.
+
 ### Veiligheidsmaatregelen
-- **Afbreken bij een onverwacht lege kant (tweerichtings):** als een locatie ineens geen bestanden meer heeft
+- **Afbreken bij een onverwacht lege kant (tweerichtings, tenzij de optie hierboven aan staat en B de lege kant is):**
+  als een locatie ineens geen bestanden meer heeft
   terwijl er bij de vorige sync wel bestanden waren, wordt de sync afgebroken. Zo wordt niet alles gewist als
   bijvoorbeeld een share niet bereikbaar is.
   *Gevolg:* wie bewust een map volledig leegmaakt, ziet die verwijdering niet doorgezet worden.
@@ -252,7 +274,8 @@ Voorbeeld van een geslaagde regel:
 | --- | --- |
 | "Bronlocatie niet bereikbaar" / "Doellocatie niet bereikbaar" | Pad bestaat niet of geen rechten. Controleer het UNC-pad en de rechten van het service-account (computeraccount bij LocalSystem) |
 | Werkt handmatig wel, via de service niet | Gekoppelde stationsletter gebruikt, of het computeraccount heeft geen rechten → UNC-pad en rechten aanpassen of serviceaccount instellen (§5.2) |
-| "Locatie … is onverwacht leeg; afgebroken…" | Een kant is leeg terwijl er eerder bestanden waren. Controleer de bereikbaarheid. Was het leegmaken bewust? Zie hieronder "Staat resetten" |
+| "Locatie … is onverwacht leeg; afgebroken…" | Een kant is leeg terwijl er eerder bestanden waren. Controleer de bereikbaarheid. Was het leegmaken van B bewust en moet A ook leeg? Zet de optie "Als B (doel) leeg is, ook A (bron) leegmaken" aan. Anders: zie hieronder "Staat resetten" |
+| Bron is onverwacht leeggemaakt | De optie "bron leegmaken als doel leeg is" staat aan en B was leeg. Controleer het logboek (`WARN … wordt leeggemaakt`) en zet bestanden terug vanuit de back-up |
 | "Deze synchronisatie loopt al." | Er loopt al een run (app of service). Wachten. Blijft het hangen: service herstarten |
 | Veel `Mislukt: kopiëren …` | Bestanden in gebruik (bijv. Outlook-PST, databases) of te weinig rechten. Uitsluiten of buiten werktijd synchroniseren |
 | Conflict-bestanden verschijnen | Bestand is aan beide kanten gewijzigd tussen twee runs. Gebruiker kiest de juiste versie en verwijdert de conflict-kopie |
@@ -261,8 +284,8 @@ Voorbeeld van een geslaagde regel:
 | Service start niet | Logboek en Windows Logboeken → *Toepassing* bekijken; `sc qc FLEsync` controleren; MSI repareren |
 
 ### Staat resetten (bewust opnieuw beginnen)
-Bij een tweerichtings-synchronisatie wordt de volgende run dan als eerste run uitgevoerd: samenvoegen,
-niets verwijderen.
+De volgende run wordt dan als eerste run uitgevoerd: samenvoegen, niets verwijderen, en de bron wordt niet
+leeggemaakt.
 1. Service stoppen.
 2. `C:\ProgramData\FLEsync\state-N.json` verwijderen (N = 1 of 2).
 3. Service starten.
